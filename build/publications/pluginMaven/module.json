@@ -1,0 +1,80 @@
+{
+  "formatVersion": "1.1",
+  "component": {
+    "group": "com.example",
+    "module": "kotlin-roku",
+    "version": "1.0.0-SNAPSHOT",
+    "attributes": {
+      "org.gradle.status": "integration"
+    }
+  },
+  "createdBy": {
+    "gradle": {
+      "version": "8.11.1"
+    }
+  },
+  "variants": [
+    {
+      "name": "apiElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.gradle.jvm.version": 21,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-api",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      },
+      "files": [
+        {
+          "name": "kotlin-roku-1.0.0-SNAPSHOT.jar",
+          "url": "kotlin-roku-1.0.0-SNAPSHOT.jar",
+          "size": 12359,
+          "sha512": "6ae97bb54bf169a150e310a167d4e13d6d2ba9b0d9f055c1f7fa7e104ea1aa0e66efd5effa6d5412ae077e057f2a501787f1011f1dde95d3035ee6d4a14d15ff",
+          "sha256": "6f2cbab0bad67aa1fc68013e1fafba57ff5fcbbf96d2cf3ee807bd15ec54107e",
+          "sha1": "c3058a16f16d8fe2da616ca54fceb89217560ff9",
+          "md5": "8dbf5b62d1fb469c87df8b4a25ad6942"
+        }
+      ]
+    },
+    {
+      "name": "runtimeElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.gradle.jvm.version": 21,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-runtime",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      },
+      "dependencies": [
+        {
+          "group": "org.jetbrains.kotlin",
+          "module": "kotlin-gradle-plugin",
+          "version": {
+            "requires": "2.1.255-SNAPSHOT"
+          }
+        },
+        {
+          "group": "org.jetbrains.kotlin",
+          "module": "kotlin-gradle-plugin-api",
+          "version": {
+            "requires": "2.1.255-SNAPSHOT"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "kotlin-roku-1.0.0-SNAPSHOT.jar",
+          "url": "kotlin-roku-1.0.0-SNAPSHOT.jar",
+          "size": 12359,
+          "sha512": "6ae97bb54bf169a150e310a167d4e13d6d2ba9b0d9f055c1f7fa7e104ea1aa0e66efd5effa6d5412ae077e057f2a501787f1011f1dde95d3035ee6d4a14d15ff",
+          "sha256": "6f2cbab0bad67aa1fc68013e1fafba57ff5fcbbf96d2cf3ee807bd15ec54107e",
+          "sha1": "c3058a16f16d8fe2da616ca54fceb89217560ff9",
+          "md5": "8dbf5b62d1fb469c87df8b4a25ad6942"
+        }
+      ]
+    }
+  ]
+}
