@@ -29,11 +29,11 @@
         {
           "name": "kotlin-roku-1.0.0-SNAPSHOT.jar",
           "url": "kotlin-roku-1.0.0-SNAPSHOT.jar",
-          "size": 12359,
-          "sha512": "6ae97bb54bf169a150e310a167d4e13d6d2ba9b0d9f055c1f7fa7e104ea1aa0e66efd5effa6d5412ae077e057f2a501787f1011f1dde95d3035ee6d4a14d15ff",
-          "sha256": "6f2cbab0bad67aa1fc68013e1fafba57ff5fcbbf96d2cf3ee807bd15ec54107e",
-          "sha1": "c3058a16f16d8fe2da616ca54fceb89217560ff9",
-          "md5": "8dbf5b62d1fb469c87df8b4a25ad6942"
+          "size": 16383,
+          "sha512": "2aa8f4d9829ab3ce8621159442145d084539627ba9eca3bd04ed600332f6e831fa40fea16b2cddca7df7edec19c81d2513662bba5f1b19fa5a6fe6850d21d874",
+          "sha256": "cb284b4a37d35acfe25da1069c928dd7f71548c50981cf15ed4c474ce9422e68",
+          "sha1": "61d9c6f2f44850678e91688c058c78a9f1a9c47e",
+          "md5": "5731be3ee31f953dd726ad7957907f17"
         }
       ]
     },
@@ -68,11 +68,11 @@
         {
           "name": "kotlin-roku-1.0.0-SNAPSHOT.jar",
           "url": "kotlin-roku-1.0.0-SNAPSHOT.jar",
-          "size": 12359,
-          "sha512": "6ae97bb54bf169a150e310a167d4e13d6d2ba9b0d9f055c1f7fa7e104ea1aa0e66efd5effa6d5412ae077e057f2a501787f1011f1dde95d3035ee6d4a14d15ff",
-          "sha256": "6f2cbab0bad67aa1fc68013e1fafba57ff5fcbbf96d2cf3ee807bd15ec54107e",
-          "sha1": "c3058a16f16d8fe2da616ca54fceb89217560ff9",
-          "md5": "8dbf5b62d1fb469c87df8b4a25ad6942"
+          "size": 16383,
+          "sha512": "2aa8f4d9829ab3ce8621159442145d084539627ba9eca3bd04ed600332f6e831fa40fea16b2cddca7df7edec19c81d2513662bba5f1b19fa5a6fe6850d21d874",
+          "sha256": "cb284b4a37d35acfe25da1069c928dd7f71548c50981cf15ed4c474ce9422e68",
+          "sha1": "61d9c6f2f44850678e91688c058c78a9f1a9c47e",
+          "md5": "5731be3ee31f953dd726ad7957907f17"
         }
       ]
     }

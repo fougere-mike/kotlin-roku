@@ -5,6 +5,7 @@ import org.gradle.api.Plugin
 import org.gradle.api.Project
 import org.jetbrains.kotlin.gradle.dsl.KotlinMultiplatformExtension
 import org.jetbrains.kotlin.gradle.plugin.KotlinMultiplatformPluginWrapper
+import org.jetbrains.kotlin.gradle.targets.brs.KotlinBrsCompile
 
 class RokuPlugin : Plugin<Project> {
     override fun apply(project: Project) {
@@ -24,6 +25,26 @@ class RokuPlugin : Plugin<Project> {
         // Apply BRS target
         kotlin.brs()
 
+        // Create a configuration to resolve the BRS compiler JAR
+        val brsCompilerConfig = project.configurations.create("brsCompiler") {
+            isCanBeConsumed = false
+            isCanBeResolved = true
+        }
+
+        // Add the BRS compiler dependency
+        project.dependencies.add(
+            "brsCompiler",
+            "org.jetbrains.kotlin:kotlin-compiler-brs:${project.findProperty("kotlin.version") ?: "2.1.255-SNAPSHOT"}"
+        )
+
+        // Configure the BRS compile task with the compiler JAR
+        project.afterEvaluate {
+            project.tasks.withType(KotlinBrsCompile::class.java).configureEach {
+                val compilerJarFile = brsCompilerConfig.singleFile
+                compilerJar.set(compilerJarFile)
+            }
+        }
+
         // Register tasks
         registerTasks(project, rokuExtension)
     }
@@ -37,7 +58,7 @@ class RokuPlugin : Plugin<Project> {
             // Depend on the BRS compile task (uses default naming convention)
             dependsOn("compileKotlinBrs")
 
-            compiledBrs.set(project.layout.buildDirectory.dir("brs/brs/main"))
+            compiledBrs.set(project.layout.buildDirectory.dir("brs/brs/main/source"))
             manifest.set(extension.manifestFile)
             images.from(extension.imagesDir)
             outputZip.set(
