@@ -1,11 +1,13 @@
 package com.example.roku.gradle
 
+import com.example.roku.gradle.tasks.InstallRokuTask
 import com.example.roku.gradle.tasks.PackageRokuTask
 import org.gradle.api.Plugin
 import org.gradle.api.Project
 import org.jetbrains.kotlin.gradle.dsl.KotlinMultiplatformExtension
 import org.jetbrains.kotlin.gradle.plugin.KotlinMultiplatformPluginWrapper
 import org.jetbrains.kotlin.gradle.targets.brs.KotlinBrsCompile
+import java.util.Properties
 
 class RokuPlugin : Plugin<Project> {
     override fun apply(project: Project) {
@@ -50,22 +52,62 @@ class RokuPlugin : Plugin<Project> {
     }
 
     private fun registerTasks(project: Project, extension: RokuExtension) {
-        // Package task: creates Roku .zip
-        project.tasks.register("packageRoku", PackageRokuTask::class.java).configure {
-            group = "roku"
-            description = "Package Roku app as .zip"
-
-            // Depend on the BRS compile task (uses default naming convention)
-            dependsOn("compileKotlinBrs")
-
-            compiledBrs.set(project.layout.buildDirectory.dir("brs/brs/main/source"))
-            manifest.set(extension.manifestFile)
-            images.from(extension.imagesDir)
-            outputZip.set(
-                extension.appName.flatMap { appName ->
-                    project.layout.buildDirectory.file("roku/$appName.zip")
-                }
-            )
+        // Load device config from local.properties / environment variables
+        val localProps = loadLocalProperties(project)
+        val deviceIp = project.provider {
+            localProps["roku.deviceIp"] as? String
+                ?: System.getenv("ROKU_DEVICE_IP")
+                ?: ""
         }
+        val devicePassword = project.provider {
+            localProps["roku.devicePassword"] as? String
+                ?: System.getenv("ROKU_PASSWORD")
+                ?: ""
+        }
+
+        // Set conventions on extension so users can access them if needed
+        extension.deviceIP.convention(deviceIp)
+        extension.devicePassword.convention(devicePassword)
+
+        // Package task: creates Roku .zip
+        val packageTask = project.tasks.register("packageRoku", PackageRokuTask::class.java).apply {
+            configure {
+                group = "roku"
+                description = "Package Roku app as .zip"
+
+                // Depend on the BRS compile task (uses default naming convention)
+                dependsOn("compileKotlinBrs")
+
+                compiledBrs.set(project.layout.buildDirectory.dir("brs/brs/main/source"))
+                manifest.set(extension.manifestFile)
+                images.from(extension.imagesDir)
+                outputZip.set(
+                    extension.appName.flatMap { appName ->
+                        project.layout.buildDirectory.file("roku/$appName.zip")
+                    }
+                )
+            }
+        }
+
+        // Install task: deploys .zip to Roku device
+        project.tasks.register("installRoku", InstallRokuTask::class.java).configure {
+            group = "roku"
+            description = "Install Roku app to device"
+
+            dependsOn(packageTask)
+
+            zipFile.set(packageTask.flatMap { it.outputZip })
+            this.deviceIp.set(extension.deviceIP)
+            this.devicePassword.set(extension.devicePassword)
+        }
+    }
+
+    private fun loadLocalProperties(project: Project): Properties {
+        val props = Properties()
+        val localPropsFile = project.rootProject.file("local.properties")
+        if (localPropsFile.exists()) {
+            localPropsFile.inputStream().use { props.load(it) }
+        }
+        return props
     }
 }

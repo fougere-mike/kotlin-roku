@@ -3,25 +3,25 @@
   <groupId>com.example</groupId>
   <artifactId>kotlin-roku</artifactId>
   <versioning>
-    <lastUpdated>20251202062003</lastUpdated>
+    <lastUpdated>20251202063324</lastUpdated>
     <snapshot>
       <localCopy>true</localCopy>
     </snapshot>
     <snapshotVersions>
       <snapshotVersion>
-        <extension>jar</extension>
-        <value>1.0.0-SNAPSHOT</value>
-        <updated>20251202062003</updated>
-      </snapshotVersion>
-      <snapshotVersion>
         <extension>module</extension>
         <value>1.0.0-SNAPSHOT</value>
-        <updated>20251202062003</updated>
+        <updated>20251202063324</updated>
       </snapshotVersion>
       <snapshotVersion>
         <extension>pom</extension>
         <value>1.0.0-SNAPSHOT</value>
-        <updated>20251202062003</updated>
+        <updated>20251202063324</updated>
+      </snapshotVersion>
+      <snapshotVersion>
+        <extension>jar</extension>
+        <value>1.0.0-SNAPSHOT</value>
+        <updated>20251202063324</updated>
       </snapshotVersion>
     </snapshotVersions>
   </versioning>
