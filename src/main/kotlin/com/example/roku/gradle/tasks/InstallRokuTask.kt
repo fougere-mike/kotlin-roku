@@ -127,25 +127,52 @@ abstract class InstallRokuTask : DefaultTask() {
     }
 
     private fun handleResponse(response: HttpResponse) {
+        // Parse Roku's response for actual status messages
+        val messages = parseRokuMessages(response.body)
+        val errors = messages.filter { it.type == "error" }
+        val successes = messages.filter { it.type == "success" }
+
         when {
-            response.code in 200..299 -> {
-                if (response.body.contains("Install Success", ignoreCase = true) ||
-                    response.body.contains("Application Received", ignoreCase = true)) {
-                    logger.lifecycle("Successfully installed to Roku device")
-                } else {
-                    logger.lifecycle("Roku responded with status ${response.code}")
-                    if (response.body.isNotBlank()) {
-                        logger.info("Response: ${response.body.take(500)}")
-                    }
-                }
-            }
             response.code == 401 -> {
                 throw GradleException("Authentication failed. Check your device password.")
+            }
+            errors.isNotEmpty() -> {
+                val errorText = errors.joinToString("\n") { it.text }
+                throw GradleException("Roku install failed:\n$errorText")
+            }
+            successes.any { it.text.contains("Install Success", ignoreCase = true) } -> {
+                logger.lifecycle("Successfully installed to Roku device")
+            }
+            response.code in 200..299 || successes.isNotEmpty() -> {
+                successes.forEach { logger.lifecycle(it.text) }
+                logger.lifecycle("Roku responded with status ${response.code}")
             }
             else -> {
                 throw GradleException("Failed to install: HTTP ${response.code}\n${response.body.take(500)}")
             }
         }
+    }
+
+    private data class RokuMessage(val text: String, val type: String)
+
+    private fun parseRokuMessages(body: String): List<RokuMessage> {
+        // Roku embeds messages as JSON in the HTML response
+        // Look for: JSON.parse('{"messages":[...]}')
+        val jsonPattern = """JSON\.parse\('(\{.*?"messages":\[.*?\]\})'\)""".toRegex()
+        val match = jsonPattern.find(body) ?: return emptyList()
+
+        val json = match.groupValues[1]
+            .replace("\\'", "'")
+            .replace("\\n", "\n")
+
+        // Simple parsing of the messages array
+        val messagesPattern = """"text":"([^"]+)"[^}]*"type":"([^"]+)"""".toRegex()
+        return messagesPattern.findAll(json).map { m ->
+            RokuMessage(
+                text = m.groupValues[1].replace("\\n", "\n"),
+                type = m.groupValues[2]
+            )
+        }.toList()
     }
 
     private fun parseDigestChallenge(header: String): Map<String, String> {

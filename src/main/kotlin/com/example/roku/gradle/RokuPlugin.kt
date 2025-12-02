@@ -39,11 +39,27 @@ class RokuPlugin : Plugin<Project> {
             "org.jetbrains.kotlin:kotlin-compiler-brs:${project.findProperty("kotlin.version") ?: "2.1.255-SNAPSHOT"}"
         )
 
-        // Configure the BRS compile task with the compiler JAR
+        // Create a configuration for the BRS stdlib
+        val brsStdlibConfig = project.configurations.create("kotlinBrsStdlib") {
+            isCanBeConsumed = false
+            isCanBeResolved = true
+        }
+
+        // Add the BRS stdlib dependency
+        val kotlinVersion = project.findProperty("kotlin.version") ?: "2.1.255-SNAPSHOT"
+        project.dependencies.add(
+            "kotlinBrsStdlib",
+            "org.jetbrains.kotlin:kotlin-stdlib-brs:$kotlinVersion"
+        )
+
+        // Configure the BRS compile task with the compiler JAR and stdlib
         project.afterEvaluate {
             project.tasks.withType(KotlinBrsCompile::class.java).configureEach {
                 val compilerJarFile = brsCompilerConfig.singleFile
                 compilerJar.set(compilerJarFile)
+
+                // Add stdlib to libraries
+                libraries.from(brsStdlibConfig)
             }
         }
 
