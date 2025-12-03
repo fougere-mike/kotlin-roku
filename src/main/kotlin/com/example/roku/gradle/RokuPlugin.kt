@@ -39,7 +39,7 @@ class RokuPlugin : Plugin<Project> {
             "org.jetbrains.kotlin:kotlin-compiler-brs:${project.findProperty("kotlin.version") ?: "2.1.255-SNAPSHOT"}"
         )
 
-        // Create a configuration for the BRS stdlib
+        // Create a configuration for the BRS stdlib (compile-time klib)
         val brsStdlibConfig = project.configurations.create("kotlinBrsStdlib") {
             isCanBeConsumed = false
             isCanBeResolved = true
@@ -50,6 +50,18 @@ class RokuPlugin : Plugin<Project> {
         project.dependencies.add(
             "kotlinBrsStdlib",
             "org.jetbrains.kotlin:kotlin-stdlib-brs:$kotlinVersion"
+        )
+
+        // Create a configuration for the BRS stdlib runtime files (.brs files for packaging)
+        val brsRuntimeConfig = project.configurations.create("kotlinBrsRuntime") {
+            isCanBeConsumed = false
+            isCanBeResolved = true
+        }
+
+        // Add the BRS stdlib runtime JAR dependency (contains .brs files)
+        project.dependencies.add(
+            "kotlinBrsRuntime",
+            "org.jetbrains.kotlin:kotlin-stdlib-brs:$kotlinVersion:brs-runtime"
         )
 
         // Configure the BRS compile task with the compiler JAR and stdlib
@@ -64,10 +76,14 @@ class RokuPlugin : Plugin<Project> {
         }
 
         // Register tasks
-        registerTasks(project, rokuExtension)
+        registerTasks(project, rokuExtension, brsRuntimeConfig)
     }
 
-    private fun registerTasks(project: Project, extension: RokuExtension) {
+    private fun registerTasks(
+        project: Project,
+        extension: RokuExtension,
+        brsRuntimeConfig: org.gradle.api.artifacts.Configuration
+    ) {
         // Load device config from local.properties / environment variables
         val localProps = loadLocalProperties(project)
         val deviceIp = project.provider {
@@ -100,6 +116,18 @@ class RokuPlugin : Plugin<Project> {
                 outputZip.set(
                     extension.appName.flatMap { appName ->
                         project.layout.buildDirectory.file("roku/$appName.zip")
+                    }
+                )
+
+                // Include stdlib .brs runtime files from the resolved JAR
+                stdlibBrs.from(
+                    project.provider {
+                        val runtimeJar = brsRuntimeConfig.resolve().firstOrNull()
+                        if (runtimeJar != null && runtimeJar.exists()) {
+                            project.zipTree(runtimeJar)
+                        } else {
+                            project.files()
+                        }
                     }
                 )
             }

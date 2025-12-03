@@ -24,6 +24,11 @@ abstract class PackageRokuTask : DefaultTask() {
     @get:PathSensitive(PathSensitivity.RELATIVE)
     abstract val images: ConfigurableFileCollection
 
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    @get:Optional
+    abstract val stdlibBrs: ConfigurableFileCollection
+
     @get:OutputFile
     abstract val outputZip: RegularFileProperty
 
@@ -45,6 +50,11 @@ abstract class PackageRokuTask : DefaultTask() {
                     val relativePath = file.relativeTo(brsDir).path
                     addToZip(zip, file, "source/$relativePath")
                 }
+            }
+
+            // Add stdlib .brs runtime files to source/
+            stdlibBrs.files.filter { it.exists() && it.extension == "brs" }.forEach { file ->
+                addToZip(zip, file, "source/${file.name}")
             }
 
             // Add images/
