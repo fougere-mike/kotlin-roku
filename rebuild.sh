@@ -1,9 +1,11 @@
 #!/bin/bash
 set -e
 
-echo "=== Building and publishing kotlin-roku plugin to Maven Local ==="
+echo "=== Cleaning Maven Local cache for kotlin-roku plugin ==="
+rm -rf ~/.m2/repository/com/example/kotlin-roku
 
-./gradlew publishToMavenLocal --no-daemon
+echo "=== Building and publishing kotlin-roku plugin to Maven Local ==="
+./gradlew clean publishToMavenLocal --no-daemon
 
 echo ""
 echo "=== kotlin-roku plugin published to Maven Local ==="
