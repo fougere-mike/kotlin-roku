@@ -1,5 +1,6 @@
 package com.example.roku.gradle
 
+import com.example.roku.gradle.tasks.DeviceLogTask
 import com.example.roku.gradle.tasks.InstallRokuTask
 import com.example.roku.gradle.tasks.PackageRokuTask
 import org.gradle.api.Plugin
@@ -143,6 +144,13 @@ class RokuPlugin : Plugin<Project> {
             zipFile.set(packageTask.flatMap { it.outputZip })
             this.deviceIp.set(extension.deviceIP)
             this.devicePassword.set(extension.devicePassword)
+        }
+
+        // Device log task: streams debug output from device
+        project.tasks.register("deviceLog", DeviceLogTask::class.java).configure {
+            group = "roku"
+            description = "Tail Roku device debug console logs"
+            this.deviceIp.set(extension.deviceIP)
         }
     }
 
