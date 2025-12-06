@@ -3,6 +3,7 @@ package com.example.roku.gradle
 import com.example.roku.gradle.tasks.DeviceLogTask
 import com.example.roku.gradle.tasks.InstallRokuTask
 import com.example.roku.gradle.tasks.PackageRokuTask
+import com.example.roku.gradle.tasks.RunRokuTestsTask
 import org.gradle.api.Plugin
 import org.gradle.api.Project
 import org.jetbrains.kotlin.gradle.dsl.KotlinMultiplatformExtension
@@ -19,6 +20,13 @@ class RokuPlugin : Plugin<Project> {
         val rokuExtension = project.extensions.create(
             "roku",
             RokuExtension::class.java,
+            project
+        )
+
+        // Create Roku test extension
+        val rokuTestExtension = project.extensions.create(
+            "rokuTest",
+            RokuTestExtension::class.java,
             project
         )
 
@@ -77,12 +85,13 @@ class RokuPlugin : Plugin<Project> {
         }
 
         // Register tasks
-        registerTasks(project, rokuExtension, brsRuntimeConfig)
+        registerTasks(project, rokuExtension, rokuTestExtension, brsRuntimeConfig)
     }
 
     private fun registerTasks(
         project: Project,
         extension: RokuExtension,
+        testExtension: RokuTestExtension,
         brsRuntimeConfig: org.gradle.api.artifacts.Configuration
     ) {
         // Load device config from local.properties / environment variables
@@ -151,6 +160,90 @@ class RokuPlugin : Plugin<Project> {
             group = "roku"
             description = "Tail Roku device debug console logs"
             this.deviceIp.set(extension.deviceIP)
+        }
+
+        // ==================== Test Tasks ====================
+
+        // Package tests task: creates Roku test app .zip
+        val packageTestsTask = project.tasks.register("packageRokuTests", PackageRokuTask::class.java).apply {
+            configure {
+                group = "roku test"
+                description = "Package Roku test app as .zip"
+
+                // Depend on the test compile task if it exists
+                project.tasks.findByName("compileTestKotlinBrs")?.let {
+                    dependsOn(it)
+                } ?: dependsOn("compileKotlinBrs")
+
+                // Use test source output if available, otherwise main
+                val testSourceDir = project.layout.buildDirectory.dir("brs/brs/test/source")
+                val mainSourceDir = project.layout.buildDirectory.dir("brs/brs/main/source")
+                compiledBrs.set(project.provider {
+                    val testDir = testSourceDir.get().asFile
+                    if (testDir.exists() && testDir.listFiles()?.isNotEmpty() == true) {
+                        testSourceDir.get()
+                    } else {
+                        mainSourceDir.get()
+                    }
+                })
+
+                manifest.set(extension.manifestFile)
+                images.from(extension.imagesDir)
+                outputZip.set(
+                    extension.appName.flatMap { appName ->
+                        project.layout.buildDirectory.file("roku/${appName}Tests.zip")
+                    }
+                )
+
+                // Include stdlib .brs runtime files from the resolved JAR
+                stdlibBrs.from(
+                    project.provider {
+                        val runtimeJar = brsRuntimeConfig.resolve().firstOrNull()
+                        if (runtimeJar != null && runtimeJar.exists()) {
+                            project.zipTree(runtimeJar)
+                        } else {
+                            project.files()
+                        }
+                    }
+                )
+            }
+        }
+
+        // Install tests task: deploys test app to Roku device
+        val installTestsTask = project.tasks.register("installRokuTests", InstallRokuTask::class.java).apply {
+            configure {
+                group = "roku test"
+                description = "Install Roku test app to device"
+
+                dependsOn(packageTestsTask)
+
+                zipFile.set(packageTestsTask.flatMap { it.outputZip })
+                this.deviceIp.set(extension.deviceIP)
+                this.devicePassword.set(extension.devicePassword)
+            }
+        }
+
+        // Run tests task: connects to device and parses test output
+        val runTestsTask = project.tasks.register("runRokuTests", RunRokuTestsTask::class.java).apply {
+            configure {
+                group = "roku test"
+                description = "Run tests on Roku device and collect results"
+
+                dependsOn(installTestsTask)
+
+                this.deviceIp.set(extension.deviceIP)
+                testTimeout.set(testExtension.timeout)
+                ignoreFailures.set(testExtension.ignoreFailures)
+                resultsJson.set(testExtension.reportsDir.file("results.json"))
+                resultsXml.set(testExtension.reportsDir.file("results.xml"))
+            }
+        }
+
+        // Convenience task: full test cycle
+        project.tasks.register("rokuTest").configure {
+            group = "roku test"
+            description = "Build, install, and run all Roku tests"
+            dependsOn(runTestsTask)
         }
     }
 
