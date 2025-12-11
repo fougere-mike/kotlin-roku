@@ -6,9 +6,19 @@ import com.example.roku.gradle.tasks.PackageRokuTask
 import com.example.roku.gradle.tasks.RunRokuTestsTask
 import org.gradle.api.Plugin
 import org.gradle.api.Project
+import org.gradle.api.artifacts.Configuration
 import org.jetbrains.kotlin.gradle.dsl.KotlinMultiplatformExtension
+import org.jetbrains.kotlin.gradle.idea.tcs.IdeaKotlinBinaryDependency
+import org.jetbrains.kotlin.gradle.idea.tcs.IdeaKotlinClasspath
+import org.jetbrains.kotlin.gradle.idea.tcs.IdeaKotlinDependency
+import org.jetbrains.kotlin.gradle.idea.tcs.IdeaKotlinResolvedBinaryDependency
+import org.jetbrains.kotlin.gradle.ExternalKotlinTargetApi
 import org.jetbrains.kotlin.gradle.plugin.KotlinMultiplatformPluginWrapper
+import org.jetbrains.kotlin.gradle.plugin.KotlinSourceSet
+import org.jetbrains.kotlin.gradle.plugin.ide.IdeDependencyResolver
+import org.jetbrains.kotlin.gradle.plugin.ide.IdeMultiplatformImport
 import org.jetbrains.kotlin.gradle.targets.brs.KotlinBrsCompile
+import org.jetbrains.kotlin.tooling.core.mutableExtrasOf
 import java.util.Properties
 
 class RokuPlugin : Plugin<Project> {
@@ -43,9 +53,10 @@ class RokuPlugin : Plugin<Project> {
         }
 
         // Add the BRS compiler dependency
+        val kotlinVersion = project.findProperty("kotlin.version") ?: "2.1.255-SNAPSHOT"
         project.dependencies.add(
             "brsCompiler",
-            "org.jetbrains.kotlin:kotlin-compiler-brs:${project.findProperty("kotlin.version") ?: "2.1.255-SNAPSHOT"}"
+            "org.jetbrains.kotlin:kotlin-compiler-brs:$kotlinVersion"
         )
 
         // Create a configuration for the BRS stdlib (compile-time klib)
@@ -55,11 +66,14 @@ class RokuPlugin : Plugin<Project> {
         }
 
         // Add the BRS stdlib dependency
-        val kotlinVersion = project.findProperty("kotlin.version") ?: "2.1.255-SNAPSHOT"
         project.dependencies.add(
             "kotlinBrsStdlib",
             "org.jetbrains.kotlin:kotlin-stdlib-brs:$kotlinVersion"
         )
+
+        // Register IDE import for BRS source sets
+        // This allows IntelliJ to properly index Kotlin files targeting BrightScript
+        registerIdeImport(project, brsStdlibConfig)
 
         // Create a configuration for the BRS stdlib runtime files (.brs files for packaging)
         val brsRuntimeConfig = project.configurations.create("kotlinBrsRuntime") {
@@ -254,5 +268,50 @@ class RokuPlugin : Plugin<Project> {
             localPropsFile.inputStream().use { props.load(it) }
         }
         return props
+    }
+
+    /**
+     * Registers IDE import handlers for BRS source sets.
+     * This allows IntelliJ to properly index Kotlin files targeting BrightScript
+     * by providing the BRS stdlib as a resolvable dependency during Gradle sync.
+     */
+    @OptIn(ExternalKotlinTargetApi::class)
+    private fun registerIdeImport(project: Project, brsStdlibConfig: Configuration) {
+        val ideImport = IdeMultiplatformImport.instance(project)
+
+        // Register a dependency resolver for BRS source sets
+        // We identify BRS source sets by their naming convention (brsMain, brsTest, etc.)
+        ideImport.registerDependencyResolver(
+            resolver = BrsStdlibIdeDependencyResolver(brsStdlibConfig),
+            constraint = IdeMultiplatformImport.SourceSetConstraint { sourceSet ->
+                sourceSet.name.startsWith("brs") || sourceSet.name.contains("Brs")
+            },
+            phase = IdeMultiplatformImport.DependencyResolutionPhase.BinaryDependencyResolution,
+            priority = IdeMultiplatformImport.Priority.normal
+        )
+    }
+}
+
+/**
+ * IDE dependency resolver for BRS source sets.
+ * Returns the BRS stdlib klib as an IDE dependency so IntelliJ can resolve
+ * symbols from kotlin-stdlib-brs during indexing.
+ */
+@OptIn(ExternalKotlinTargetApi::class)
+internal class BrsStdlibIdeDependencyResolver(
+    private val stdlibConfig: Configuration
+) : IdeDependencyResolver {
+    override fun resolve(sourceSet: KotlinSourceSet): Set<IdeaKotlinDependency> {
+        val stdlibFiles = stdlibConfig.resolve()
+        if (stdlibFiles.isEmpty()) return emptySet()
+
+        return setOf(
+            IdeaKotlinResolvedBinaryDependency(
+                binaryType = IdeaKotlinBinaryDependency.KOTLIN_COMPILE_BINARY_TYPE,
+                classpath = IdeaKotlinClasspath(stdlibFiles),
+                coordinates = null,
+                extras = mutableExtrasOf()
+            )
+        )
     }
 }

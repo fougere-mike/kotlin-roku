@@ -15,6 +15,9 @@ repositories {
 dependencies {
     implementation("org.jetbrains.kotlin:kotlin-gradle-plugin:2.1.255-SNAPSHOT")
     implementation("org.jetbrains.kotlin:kotlin-gradle-plugin-api:2.1.255-SNAPSHOT")
+    // IDE integration APIs for source set indexing
+    implementation("org.jetbrains.kotlin:kotlin-gradle-plugin-idea:2.1.255-SNAPSHOT")
+    implementation("org.jetbrains.kotlin:kotlin-tooling-core:2.1.255-SNAPSHOT")
 }
 
 gradlePlugin {
