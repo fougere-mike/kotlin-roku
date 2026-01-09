@@ -3,6 +3,7 @@ package com.example.roku.gradle
 import com.example.roku.gradle.tasks.DeviceLogTask
 import com.example.roku.gradle.tasks.InstallRokuTask
 import com.example.roku.gradle.tasks.PackageRokuTask
+import com.example.roku.gradle.tasks.ProcessComponentXmlTask
 import com.example.roku.gradle.tasks.RunRokuTestsTask
 import org.gradle.api.Plugin
 import org.gradle.api.Project
@@ -41,10 +42,10 @@ class RokuPlugin : Plugin<Project> {
         )
 
         // Configure BRS target immediately after plugin apply
-        val kotlin = project.extensions.getByType(KotlinMultiplatformExtension::class.java)
+        val kotlinExt = project.extensions.getByType(KotlinMultiplatformExtension::class.java)
 
         // Apply BRS target
-        kotlin.brs()
+        kotlinExt.brs()
 
         // Create a configuration to resolve the BRS compiler JAR
         val brsCompilerConfig = project.configurations.create("brsCompiler") {
@@ -99,14 +100,16 @@ class RokuPlugin : Plugin<Project> {
         }
 
         // Register tasks
-        registerTasks(project, rokuExtension, rokuTestExtension, brsRuntimeConfig)
+        registerTasks(project, rokuExtension, rokuTestExtension, brsRuntimeConfig, brsCompilerConfig, brsStdlibConfig)
     }
 
     private fun registerTasks(
         project: Project,
         extension: RokuExtension,
         testExtension: RokuTestExtension,
-        brsRuntimeConfig: org.gradle.api.artifacts.Configuration
+        brsRuntimeConfig: org.gradle.api.artifacts.Configuration,
+        brsCompilerConfig: org.gradle.api.artifacts.Configuration,
+        brsStdlibConfig: org.gradle.api.artifacts.Configuration
     ) {
         // Load device config from local.properties / environment variables
         val localProps = loadLocalProperties(project)
@@ -125,18 +128,101 @@ class RokuPlugin : Plugin<Project> {
         extension.deviceIP.convention(deviceIp)
         extension.devicePassword.convention(devicePassword)
 
+        // Stdlib BRS files provider (used by multiple tasks)
+        val stdlibBrsFilesProvider = project.provider {
+            val runtimeJar = brsRuntimeConfig.resolve().firstOrNull()
+            if (runtimeJar != null && runtimeJar.exists()) {
+                project.zipTree(runtimeJar)
+            } else {
+                project.files()
+            }
+        }
+
+        // Compiled components directory
+        val compiledComponentsDirProvider = project.layout.buildDirectory.dir("brs/brs/main/components")
+
+        // Compiled main source directory (for dependency tracking)
+        val compiledMainSourceDir = project.layout.buildDirectory.dir("brs/brs/main/source")
+
+        // Component compile task: compiles .kt files from components/ to components/*.brs
+        val compileComponentsTask = project.tasks.register("compileKotlinBrsComponents", KotlinBrsCompile::class.java).apply {
+            configure {
+                group = "roku"
+                description = "Compile component Kotlin files to BrightScript"
+
+                // Only compile .kt files from components directory
+                sources.from(project.fileTree(extension.componentsDir) {
+                    include("**/*.kt")
+                })
+
+                // Output to components directory structure
+                outputDirectory.set(compiledComponentsDirProvider)
+
+                // Must run after main compilation so it can reference main source classes
+                dependsOn("compileKotlinBrs")
+
+                // Configure compiler (done in afterEvaluate because we need the resolved JAR)
+                project.afterEvaluate {
+                    compilerJar.set(brsCompilerConfig.singleFile)
+                    compilerClasspath.from(brsCompilerConfig)
+                    // Include stdlib + main compiled output as libraries
+                    libraries.from(brsStdlibConfig)
+                    libraries.from(compiledMainSourceDir)
+                }
+            }
+        }
+
+        // Process component XML task: injects script imports
+        val processComponentXmlTask = project.tasks.register("processComponentXml", ProcessComponentXmlTask::class.java).apply {
+            configure {
+                group = "roku"
+                description = "Process component XML files to inject script imports"
+
+                // Must run after both compile tasks
+                dependsOn("compileKotlinBrs")
+                dependsOn(compileComponentsTask)
+
+                sourceXmlDir.set(extension.componentsDir)
+                compiledComponentsDir.set(compiledComponentsDirProvider)
+                compiledMainSource.set(compiledMainSourceDir)
+                stdlibBrsFiles.from(stdlibBrsFilesProvider)
+                outputXmlDir.set(project.layout.buildDirectory.dir("roku/processedComponents"))
+            }
+        }
+
         // Package task: creates Roku .zip
         val packageTask = project.tasks.register("packageRoku", PackageRokuTask::class.java).apply {
             configure {
                 group = "roku"
                 description = "Package Roku app as .zip"
 
-                // Depend on the BRS compile task (uses default naming convention)
+                // Depend on all compile tasks and XML processing
                 dependsOn("compileKotlinBrs")
+                dependsOn(compileComponentsTask)
+                dependsOn(processComponentXmlTask)
 
                 compiledBrs.set(project.layout.buildDirectory.dir("brs/brs/main/source"))
                 manifest.set(extension.manifestFile)
+
+                // Configure images with directory structure preservation
                 images.from(extension.imagesDir)
+                imagesBaseDir.set(extension.imagesDir)
+
+                // Configure components (processed XML files with script imports)
+                components.from(processComponentXmlTask.flatMap { it.outputXmlDir })
+                componentsBaseDir.set(processComponentXmlTask.flatMap { it.outputXmlDir })
+
+                // Add compiled component .brs files
+                compiledComponents.set(compiledComponentsDirProvider)
+
+                // Configure fonts
+                fonts.from(extension.fontsDir)
+                fontsBaseDir.set(extension.fontsDir)
+
+                // Configure assets
+                assets.from(extension.assetsDir)
+                assetsBaseDir.set(extension.assetsDir)
+
                 outputZip.set(
                     extension.appName.flatMap { appName ->
                         project.layout.buildDirectory.file("roku/$appName.zip")
@@ -144,16 +230,7 @@ class RokuPlugin : Plugin<Project> {
                 )
 
                 // Include stdlib .brs runtime files from the resolved JAR
-                stdlibBrs.from(
-                    project.provider {
-                        val runtimeJar = brsRuntimeConfig.resolve().firstOrNull()
-                        if (runtimeJar != null && runtimeJar.exists()) {
-                            project.zipTree(runtimeJar)
-                        } else {
-                            project.files()
-                        }
-                    }
-                )
+                stdlibBrs.from(stdlibBrsFilesProvider)
             }
         }
 
@@ -184,10 +261,12 @@ class RokuPlugin : Plugin<Project> {
                 group = "roku test"
                 description = "Package Roku test app as .zip"
 
-                // Depend on the test compile task if it exists
+                // Depend on the test compile task if it exists, plus component compile and XML processing
                 project.tasks.findByName("compileTestKotlinBrs")?.let {
                     dependsOn(it)
                 } ?: dependsOn("compileKotlinBrs")
+                dependsOn(compileComponentsTask)
+                dependsOn(processComponentXmlTask)
 
                 // Use test source output if available, otherwise main
                 val testSourceDir = project.layout.buildDirectory.dir("brs/brs/test/source")
@@ -202,7 +281,26 @@ class RokuPlugin : Plugin<Project> {
                 })
 
                 manifest.set(extension.manifestFile)
+
+                // Configure images with directory structure preservation
                 images.from(extension.imagesDir)
+                imagesBaseDir.set(extension.imagesDir)
+
+                // Configure components (processed XML files with script imports)
+                components.from(processComponentXmlTask.flatMap { it.outputXmlDir })
+                componentsBaseDir.set(processComponentXmlTask.flatMap { it.outputXmlDir })
+
+                // Add compiled component .brs files
+                compiledComponents.set(compiledComponentsDirProvider)
+
+                // Configure fonts
+                fonts.from(extension.fontsDir)
+                fontsBaseDir.set(extension.fontsDir)
+
+                // Configure assets
+                assets.from(extension.assetsDir)
+                assetsBaseDir.set(extension.assetsDir)
+
                 outputZip.set(
                     extension.appName.flatMap { appName ->
                         project.layout.buildDirectory.file("roku/${appName}Tests.zip")
@@ -210,16 +308,7 @@ class RokuPlugin : Plugin<Project> {
                 )
 
                 // Include stdlib .brs runtime files from the resolved JAR
-                stdlibBrs.from(
-                    project.provider {
-                        val runtimeJar = brsRuntimeConfig.resolve().firstOrNull()
-                        if (runtimeJar != null && runtimeJar.exists()) {
-                            project.zipTree(runtimeJar)
-                        } else {
-                            project.files()
-                        }
-                    }
-                )
+                stdlibBrs.from(stdlibBrsFilesProvider)
             }
         }
 

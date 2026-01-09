@@ -24,6 +24,43 @@ abstract class PackageRokuTask : DefaultTask() {
     @get:PathSensitive(PathSensitivity.RELATIVE)
     abstract val images: ConfigurableFileCollection
 
+    @get:InputDirectory
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    @get:Optional
+    abstract val imagesBaseDir: DirectoryProperty
+
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val components: ConfigurableFileCollection
+
+    @get:InputDirectory
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    @get:Optional
+    abstract val componentsBaseDir: DirectoryProperty
+
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val fonts: ConfigurableFileCollection
+
+    @get:InputDirectory
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    @get:Optional
+    abstract val fontsBaseDir: DirectoryProperty
+
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val assets: ConfigurableFileCollection
+
+    @get:InputDirectory
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    @get:Optional
+    abstract val assetsBaseDir: DirectoryProperty
+
+    @get:InputDirectory
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    @get:Optional
+    abstract val compiledComponents: DirectoryProperty
+
     @get:InputFiles
     @get:PathSensitive(PathSensitivity.RELATIVE)
     @get:Optional
@@ -57,10 +94,28 @@ abstract class PackageRokuTask : DefaultTask() {
                 addToZip(zip, file, "source/${file.name}")
             }
 
-            // Add images/
-            images.files.filter { it.exists() }.forEach { file ->
-                addToZip(zip, file, "images/${file.name}")
+            // Add components/ (SceneGraph XML files) with directory structure
+            addDirectoryToZip(zip, components, componentsBaseDir, "components")
+
+            // Add compiled component .brs files to components/
+            if (compiledComponents.isPresent) {
+                val componentsDir = compiledComponents.get().asFile
+                if (componentsDir.exists()) {
+                    componentsDir.walkTopDown().filter { it.isFile && it.extension == "brs" }.forEach { file ->
+                        val relativePath = file.relativeTo(componentsDir).path
+                        addToZip(zip, file, "components/$relativePath")
+                    }
+                }
             }
+
+            // Add images/ with directory structure
+            addDirectoryToZip(zip, images, imagesBaseDir, "images")
+
+            // Add fonts/ with directory structure
+            addDirectoryToZip(zip, fonts, fontsBaseDir, "fonts")
+
+            // Add assets/ with directory structure
+            addDirectoryToZip(zip, assets, assetsBaseDir, "assets")
         }
 
         logger.lifecycle("Created Roku package: ${zipFile.absolutePath}")
@@ -70,5 +125,22 @@ abstract class PackageRokuTask : DefaultTask() {
         zip.putNextEntry(ZipEntry(entryPath))
         file.inputStream().use { it.copyTo(zip) }
         zip.closeEntry()
+    }
+
+    private fun addDirectoryToZip(
+        zip: ZipOutputStream,
+        files: ConfigurableFileCollection,
+        baseDir: DirectoryProperty,
+        targetPrefix: String
+    ) {
+        val base = if (baseDir.isPresent) baseDir.get().asFile else null
+        files.files.filter { it.exists() && it.isFile }.forEach { file ->
+            val relativePath = if (base != null && file.startsWith(base)) {
+                file.relativeTo(base).path
+            } else {
+                file.name
+            }
+            addToZip(zip, file, "$targetPrefix/$relativePath")
+        }
     }
 }

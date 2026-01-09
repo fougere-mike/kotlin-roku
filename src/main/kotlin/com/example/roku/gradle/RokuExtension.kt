@@ -20,6 +20,8 @@ abstract class RokuExtension @Inject constructor(project: Project) {
     abstract val manifestFile: RegularFileProperty
     abstract val imagesDir: DirectoryProperty
     abstract val componentsDir: DirectoryProperty
+    abstract val fontsDir: DirectoryProperty
+    abstract val assetsDir: DirectoryProperty
 
     // Device deployment
     abstract val deviceIP: Property<String>
@@ -33,5 +35,7 @@ abstract class RokuExtension @Inject constructor(project: Project) {
         manifestFile.convention(project.layout.projectDirectory.file("manifest"))
         imagesDir.convention(project.layout.projectDirectory.dir("images"))
         componentsDir.convention(project.layout.projectDirectory.dir("components"))
+        fontsDir.convention(project.layout.projectDirectory.dir("fonts"))
+        assetsDir.convention(project.layout.projectDirectory.dir("assets"))
     }
 }
