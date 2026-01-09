@@ -394,15 +394,19 @@ class RokuPlugin : Plugin<Project> {
     private fun registerIdeImport(project: Project, brsStdlibConfig: Configuration) {
         val ideImport = IdeMultiplatformImport.instance(project)
 
+        println("[RokuPlugin] Registering BRS IDE import resolver")
+
         // Register a dependency resolver for BRS source sets
         // We identify BRS source sets by their naming convention (brsMain, brsTest, etc.)
         ideImport.registerDependencyResolver(
             resolver = BrsStdlibIdeDependencyResolver(brsStdlibConfig),
             constraint = IdeMultiplatformImport.SourceSetConstraint { sourceSet ->
-                sourceSet.name.startsWith("brs") || sourceSet.name.contains("Brs")
+                val matches = sourceSet.name.startsWith("brs") || sourceSet.name.contains("Brs")
+                println("[RokuPlugin] Checking constraint for sourceSet: ${sourceSet.name}, matches: $matches")
+                matches
             },
             phase = IdeMultiplatformImport.DependencyResolutionPhase.BinaryDependencyResolution,
-            priority = IdeMultiplatformImport.Priority.normal
+            priority = IdeMultiplatformImport.Priority.high  // Use high priority to run before other resolvers
         )
     }
 }
@@ -417,7 +421,9 @@ internal class BrsStdlibIdeDependencyResolver(
     private val stdlibConfig: Configuration
 ) : IdeDependencyResolver {
     override fun resolve(sourceSet: KotlinSourceSet): Set<IdeaKotlinDependency> {
+        println("[BrsStdlibIdeDependencyResolver] Resolving dependencies for sourceSet: ${sourceSet.name}")
         val stdlibFiles = stdlibConfig.resolve()
+        println("[BrsStdlibIdeDependencyResolver] Resolved ${stdlibFiles.size} files: ${stdlibFiles.map { it.name }}")
         if (stdlibFiles.isEmpty()) return emptySet()
 
         return setOf(
