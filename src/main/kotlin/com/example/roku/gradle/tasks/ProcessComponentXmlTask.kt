@@ -166,7 +166,8 @@ abstract class ProcessComponentXmlTask : DefaultTask() {
             name.equals("coreRuntime.brs", ignoreCase = true) ||
             name.equals("intrinsics.brs", ignoreCase = true) ||
             name.equals("primitives.brs", ignoreCase = true) ||
-            name.equals("Kotlin.brs", ignoreCase = true)
+            name.equals("Kotlin.brs", ignoreCase = true) ||
+            name.equals("console.brs", ignoreCase = true)
         }
         requiredStdlib.addAll(coreRuntimeFiles)
 
@@ -208,11 +209,11 @@ abstract class ProcessComponentXmlTask : DefaultTask() {
         }
 
         // Build the script tags to inject
+        // IMPORTANT: Stdlib must load FIRST so functions are defined before component calls them
         val scriptTags = buildString {
-            // Component's own BRS file first (sibling of XML in same directory)
-            if (hasComponentBrs) {
-                val brsPath = xmlRelativePath.replace(".xml", ".brs")
-                appendLine("  <script type=\"text/brightscript\" uri=\"pkg:/components/$brsPath\"/>")
+            // Stdlib files FIRST (so functions are defined before component's init() runs)
+            for (stdlibFile in dependencies.stdlibFiles.sorted()) {
+                appendLine("  <script type=\"text/brightscript\" uri=\"pkg:/source/$stdlibFile\"/>")
             }
 
             // Main source files (user code)
@@ -225,9 +226,10 @@ abstract class ProcessComponentXmlTask : DefaultTask() {
                 appendLine("  <script type=\"text/brightscript\" uri=\"pkg:/components/$componentFile\"/>")
             }
 
-            // Stdlib files
-            for (stdlibFile in dependencies.stdlibFiles.sorted()) {
-                appendLine("  <script type=\"text/brightscript\" uri=\"pkg:/source/$stdlibFile\"/>")
+            // Component's own BRS file LAST (can now call stdlib functions in init())
+            if (hasComponentBrs) {
+                val brsPath = xmlRelativePath.replace(".xml", ".brs")
+                appendLine("  <script type=\"text/brightscript\" uri=\"pkg:/components/$brsPath\"/>")
             }
         }
 
