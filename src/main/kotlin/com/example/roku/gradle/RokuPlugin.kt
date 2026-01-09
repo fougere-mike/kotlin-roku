@@ -192,6 +192,8 @@ class RokuPlugin : Plugin<Project> {
                 sourceXmlDir.set(extension.componentsDir)
                 compiledComponentsDir.set(compiledComponentsDirProvider)
                 compiledMainSource.set(compiledMainSourceDir)
+                // Compiler-generated XML with interface sections (for SceneGraph fields)
+                compilerGeneratedXmlDir.set(project.layout.buildDirectory.dir("brs/brs/main/components/components"))
                 stdlibBrsFiles.from(stdlibBrsFilesProvider)
                 outputXmlDir.set(project.layout.buildDirectory.dir("roku/processedComponents"))
             }
