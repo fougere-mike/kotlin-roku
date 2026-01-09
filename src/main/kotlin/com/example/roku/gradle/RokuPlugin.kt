@@ -1,5 +1,6 @@
 package com.example.roku.gradle
 
+import com.example.roku.gradle.tasks.DeleteRokuTask
 import com.example.roku.gradle.tasks.DeviceLogTask
 import com.example.roku.gradle.tasks.InstallRokuTask
 import com.example.roku.gradle.tasks.PackageRokuTask
@@ -243,14 +244,24 @@ class RokuPlugin : Plugin<Project> {
             }
         }
 
-        // Install task: deploys .zip to Roku device
+        // Install task: deploys .zip to Roku device and launches it
         project.tasks.register("installRoku", InstallRokuTask::class.java).configure {
             group = "roku"
-            description = "Install Roku app to device"
+            description = "Install Roku app to device and launch it"
 
             dependsOn(packageTask)
 
             zipFile.set(packageTask.flatMap { it.outputZip })
+            this.deviceIp.set(extension.deviceIP)
+            this.devicePassword.set(extension.devicePassword)
+            this.launchAfterInstall.convention(true)
+        }
+
+        // Delete task: removes app from Roku device
+        project.tasks.register("deleteRoku", DeleteRokuTask::class.java).configure {
+            group = "roku"
+            description = "Delete app from Roku device"
+
             this.deviceIp.set(extension.deviceIP)
             this.devicePassword.set(extension.devicePassword)
         }
@@ -324,17 +335,18 @@ class RokuPlugin : Plugin<Project> {
             }
         }
 
-        // Install tests task: deploys test app to Roku device
+        // Install tests task: deploys test app to Roku device and launches it
         val installTestsTask = project.tasks.register("installRokuTests", InstallRokuTask::class.java).apply {
             configure {
                 group = "roku test"
-                description = "Install Roku test app to device"
+                description = "Install Roku test app to device and launch it"
 
                 dependsOn(packageTestsTask)
 
                 zipFile.set(packageTestsTask.flatMap { it.outputZip })
                 this.deviceIp.set(extension.deviceIP)
                 this.devicePassword.set(extension.devicePassword)
+                this.launchAfterInstall.convention(true)
             }
         }
 

@@ -2,23 +2,15 @@ package com.example.roku.gradle.tasks
 
 import org.gradle.api.DefaultTask
 import org.gradle.api.GradleException
-import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.provider.Property
 import org.gradle.api.tasks.Input
-import org.gradle.api.tasks.InputFile
-import org.gradle.api.tasks.PathSensitive
-import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.TaskAction
 import java.io.DataOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
 
-abstract class InstallRokuTask : DefaultTask() {
-
-    @get:InputFile
-    @get:PathSensitive(PathSensitivity.NONE)
-    abstract val zipFile: RegularFileProperty
+abstract class DeleteRokuTask : DefaultTask() {
 
     @get:Input
     abstract val deviceIp: Property<String>
@@ -26,15 +18,10 @@ abstract class InstallRokuTask : DefaultTask() {
     @get:Input
     abstract val devicePassword: Property<String>
 
-    @get:Input
-    abstract val launchAfterInstall: Property<Boolean>
-
     @TaskAction
-    fun install() {
+    fun delete() {
         val ip = deviceIp.get()
         val password = devicePassword.get()
-        val file = zipFile.get().asFile
-        val launch = launchAfterInstall.getOrElse(true)
 
         if (ip.isBlank()) {
             throw GradleException("Device IP not configured. Set roku.deviceIp in local.properties or ROKU_DEVICE_IP environment variable.")
@@ -44,11 +31,10 @@ abstract class InstallRokuTask : DefaultTask() {
         }
 
         val url = "http://$ip/plugin_install"
-        val action = if (launch) "Installing and launching" else "Installing"
-        logger.lifecycle("$action ${file.name} to Roku device at $ip...")
+        logger.lifecycle("Deleting app from Roku device at $ip...")
 
         // First request to get the Digest challenge
-        val challengeResponse = sendRequest(url, file, null, launch)
+        val challengeResponse = sendRequest(url, null)
 
         if (challengeResponse.code == 401) {
             val authHeader = challengeResponse.wwwAuthenticate
@@ -64,10 +50,10 @@ abstract class InstallRokuTask : DefaultTask() {
             )
 
             // Second request with Digest auth
-            val result = sendRequest(url, file, authorizationHeader, launch)
-            handleResponse(result, launch)
+            val result = sendRequest(url, authorizationHeader)
+            handleResponse(result)
         } else {
-            handleResponse(challengeResponse, launch)
+            handleResponse(challengeResponse)
         }
     }
 
@@ -77,8 +63,8 @@ abstract class InstallRokuTask : DefaultTask() {
         val wwwAuthenticate: String?
     )
 
-    private fun sendRequest(url: String, file: java.io.File, authHeader: String?, launch: Boolean): HttpResponse {
-        val boundary = "----RokuInstall${System.currentTimeMillis()}"
+    private fun sendRequest(url: String, authHeader: String?): HttpResponse {
+        val boundary = "----RokuDelete${System.currentTimeMillis()}"
         val connection = URL(url).openConnection() as HttpURLConnection
 
         connection.apply {
@@ -93,17 +79,15 @@ abstract class InstallRokuTask : DefaultTask() {
 
         try {
             DataOutputStream(connection.outputStream).use { out ->
-                // Field: mysubmit - "Replace" installs and launches, "Install" just installs
-                val submitAction = if (launch) "Replace" else "Install"
+                // Field: mysubmit=Delete
                 out.writeBytes("--$boundary\r\n")
                 out.writeBytes("Content-Disposition: form-data; name=\"mysubmit\"\r\n\r\n")
-                out.writeBytes("$submitAction\r\n")
+                out.writeBytes("Delete\r\n")
 
-                // Field: archive (the zip file)
+                // Field: archive (empty for delete)
                 out.writeBytes("--$boundary\r\n")
-                out.writeBytes("Content-Disposition: form-data; name=\"archive\"; filename=\"${file.name}\"\r\n")
-                out.writeBytes("Content-Type: application/zip\r\n\r\n")
-                file.inputStream().use { it.copyTo(out) }
+                out.writeBytes("Content-Disposition: form-data; name=\"archive\"; filename=\"\"\r\n")
+                out.writeBytes("Content-Type: application/octet-stream\r\n\r\n")
                 out.writeBytes("\r\n")
 
                 // Field: passwd (empty)
@@ -132,8 +116,7 @@ abstract class InstallRokuTask : DefaultTask() {
         }
     }
 
-    private fun handleResponse(response: HttpResponse, launched: Boolean) {
-        // Parse Roku's response for actual status messages
+    private fun handleResponse(response: HttpResponse) {
         val messages = parseRokuMessages(response.body)
         val errors = messages.filter { it.type == "error" }
         val successes = messages.filter { it.type == "success" }
@@ -144,19 +127,17 @@ abstract class InstallRokuTask : DefaultTask() {
             }
             errors.isNotEmpty() -> {
                 val errorText = errors.joinToString("\n") { it.text }
-                throw GradleException("Roku install failed:\n$errorText")
+                throw GradleException("Roku delete failed:\n$errorText")
             }
-            successes.any { it.text.contains("Install Success", ignoreCase = true) ||
-                           it.text.contains("Application Received", ignoreCase = true) } -> {
-                val suffix = if (launched) " and launched" else ""
-                logger.lifecycle("Successfully installed$suffix to Roku device")
+            successes.any { it.text.contains("Delete Success", ignoreCase = true) } -> {
+                logger.lifecycle("Successfully deleted app from Roku device")
             }
             response.code in 200..299 || successes.isNotEmpty() -> {
                 successes.forEach { logger.lifecycle(it.text) }
                 logger.lifecycle("Roku responded with status ${response.code}")
             }
             else -> {
-                throw GradleException("Failed to install: HTTP ${response.code}\n${response.body.take(500)}")
+                throw GradleException("Failed to delete: HTTP ${response.code}\n${response.body.take(500)}")
             }
         }
     }
@@ -164,8 +145,6 @@ abstract class InstallRokuTask : DefaultTask() {
     private data class RokuMessage(val text: String, val type: String)
 
     private fun parseRokuMessages(body: String): List<RokuMessage> {
-        // Roku embeds messages as JSON in the HTML response
-        // Look for: JSON.parse('{"messages":[...]}')
         val jsonPattern = """JSON\.parse\('(\{.*?"messages":\[.*?\]\})'\)""".toRegex()
         val match = jsonPattern.find(body) ?: return emptyList()
 
@@ -173,7 +152,6 @@ abstract class InstallRokuTask : DefaultTask() {
             .replace("\\'", "'")
             .replace("\\n", "\n")
 
-        // Simple parsing of the messages array
         val messagesPattern = """"text":"([^"]+)"[^}]*"type":"([^"]+)"""".toRegex()
         return messagesPattern.findAll(json).map { m ->
             RokuMessage(
