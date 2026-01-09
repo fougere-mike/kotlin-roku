@@ -18,6 +18,7 @@ import org.jetbrains.kotlin.gradle.plugin.KotlinMultiplatformPluginWrapper
 import org.jetbrains.kotlin.gradle.plugin.KotlinSourceSet
 import org.jetbrains.kotlin.gradle.plugin.ide.IdeDependencyResolver
 import org.jetbrains.kotlin.gradle.plugin.ide.IdeMultiplatformImport
+import org.jetbrains.kotlin.gradle.dsl.KotlinBrsCompilerOptions
 import org.jetbrains.kotlin.gradle.targets.brs.KotlinBrsCompile
 import org.jetbrains.kotlin.tooling.core.mutableExtrasOf
 import java.util.Properties
@@ -145,7 +146,14 @@ class RokuPlugin : Plugin<Project> {
         val compiledMainSourceDir = project.layout.buildDirectory.dir("brs/brs/main/source")
 
         // Component compile task: compiles .kt files from components/ to components/*.brs
-        val compileComponentsTask = project.tasks.register("compileKotlinBrsComponents", KotlinBrsCompile::class.java).apply {
+        // Create compiler options using reflection (the Default class is internal)
+        val compilerOptionsClass = Class.forName("org.jetbrains.kotlin.gradle.dsl.KotlinBrsCompilerOptionsDefault")
+        val componentCompilerOptions = project.objects.newInstance(compilerOptionsClass) as KotlinBrsCompilerOptions
+        val compileComponentsTask = project.tasks.register(
+            "compileKotlinBrsComponents",
+            KotlinBrsCompile::class.java,
+            componentCompilerOptions
+        ).apply {
             configure {
                 group = "roku"
                 description = "Compile component Kotlin files to BrightScript"
@@ -161,14 +169,12 @@ class RokuPlugin : Plugin<Project> {
                 // Must run after main compilation so it can reference main source classes
                 dependsOn("compileKotlinBrs")
 
-                // Configure compiler (done in afterEvaluate because we need the resolved JAR)
-                project.afterEvaluate {
-                    compilerJar.set(brsCompilerConfig.singleFile)
-                    compilerClasspath.from(brsCompilerConfig)
-                    // Include stdlib + main compiled output as libraries
-                    libraries.from(brsStdlibConfig)
-                    libraries.from(compiledMainSourceDir)
-                }
+                // Configure compiler - use lazy providers to avoid afterEvaluate
+                compilerJar.fileProvider(project.provider { brsCompilerConfig.singleFile })
+                compilerClasspath.from(brsCompilerConfig)
+                // Include stdlib + main compiled output as libraries
+                libraries.from(brsStdlibConfig)
+                libraries.from(compiledMainSourceDir)
             }
         }
 
@@ -209,11 +215,14 @@ class RokuPlugin : Plugin<Project> {
                 imagesBaseDir.set(extension.imagesDir)
 
                 // Configure components (processed XML files with script imports)
-                components.from(processComponentXmlTask.flatMap { it.outputXmlDir })
+                components.from(processComponentXmlTask.map { task ->
+                    project.fileTree(task.outputXmlDir) { include("**/*.xml") }
+                })
                 componentsBaseDir.set(processComponentXmlTask.flatMap { it.outputXmlDir })
 
-                // Add compiled component .brs files
+                // Add compiled component .brs files (place alongside their XML files)
                 compiledComponents.set(compiledComponentsDirProvider)
+                processedXmlDir.set(processComponentXmlTask.flatMap { it.outputXmlDir })
 
                 // Configure fonts
                 fonts.from(extension.fontsDir)
@@ -287,11 +296,14 @@ class RokuPlugin : Plugin<Project> {
                 imagesBaseDir.set(extension.imagesDir)
 
                 // Configure components (processed XML files with script imports)
-                components.from(processComponentXmlTask.flatMap { it.outputXmlDir })
+                components.from(processComponentXmlTask.map { task ->
+                    project.fileTree(task.outputXmlDir) { include("**/*.xml") }
+                })
                 componentsBaseDir.set(processComponentXmlTask.flatMap { it.outputXmlDir })
 
-                // Add compiled component .brs files
+                // Add compiled component .brs files (place alongside their XML files)
                 compiledComponents.set(compiledComponentsDirProvider)
+                processedXmlDir.set(processComponentXmlTask.flatMap { it.outputXmlDir })
 
                 // Configure fonts
                 fonts.from(extension.fontsDir)

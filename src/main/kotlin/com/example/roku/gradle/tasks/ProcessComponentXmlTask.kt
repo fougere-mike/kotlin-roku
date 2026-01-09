@@ -74,6 +74,14 @@ abstract class ProcessComponentXmlTask : DefaultTask() {
             ?.map { it.relativeTo(compiledDir).path }
             ?.toSet() ?: emptySet()
 
+        // Build a map of BRS files by name for lookup
+        val brsFilesByName = mutableMapOf<String, File>()
+        compiledDir?.walkTopDown()
+            ?.filter { it.isFile && it.extension == "brs" }
+            ?.forEach { file ->
+                brsFilesByName[file.name] = file
+            }
+
         // Process each XML file
         sourceDir.walkTopDown()
             .filter { it.isFile && it.extension == "xml" }
@@ -81,12 +89,13 @@ abstract class ProcessComponentXmlTask : DefaultTask() {
                 val relativePath = xmlFile.relativeTo(sourceDir)
                 val outputFile = File(outputDir, relativePath.path)
 
-                // Find corresponding .brs file
-                val brsRelativePath = relativePath.path.replace(".xml", ".brs")
-                val componentBrsFile = compiledDir?.let { File(it, brsRelativePath) }
+                // Find corresponding .brs file by name (compiler may flatten directory structure)
+                val expectedBrsName = xmlFile.nameWithoutExtension + ".brs"
+                val componentBrsFile = brsFilesByName[expectedBrsName]
                 val hasComponentBrs = componentBrsFile?.exists() == true
 
                 // Analyze all dependencies
+                val brsRelativePath = componentBrsFile?.let { it.relativeTo(compiledDir!!).path } ?: expectedBrsName
                 val dependencies = if (hasComponentBrs && componentBrsFile != null) {
                     analyzeDependencies(
                         componentBrsFile,
@@ -200,7 +209,7 @@ abstract class ProcessComponentXmlTask : DefaultTask() {
 
         // Build the script tags to inject
         val scriptTags = buildString {
-            // Component's own BRS file first
+            // Component's own BRS file first (sibling of XML in same directory)
             if (hasComponentBrs) {
                 val brsPath = xmlRelativePath.replace(".xml", ".brs")
                 appendLine("  <script type=\"text/brightscript\" uri=\"pkg:/components/$brsPath\"/>")

@@ -61,6 +61,11 @@ abstract class PackageRokuTask : DefaultTask() {
     @get:Optional
     abstract val compiledComponents: DirectoryProperty
 
+    @get:InputDirectory
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    @get:Optional
+    abstract val processedXmlDir: DirectoryProperty
+
     @get:InputFiles
     @get:PathSensitive(PathSensitivity.RELATIVE)
     @get:Optional
@@ -97,8 +102,38 @@ abstract class PackageRokuTask : DefaultTask() {
             // Add components/ (SceneGraph XML files) with directory structure
             addDirectoryToZip(zip, components, componentsBaseDir, "components")
 
-            // Add compiled component .brs files to components/
-            if (compiledComponents.isPresent) {
+            // Add compiled component .brs files - place alongside their XML files
+            if (compiledComponents.isPresent && processedXmlDir.isPresent) {
+                val componentsDir = compiledComponents.get().asFile
+                val xmlDir = processedXmlDir.get().asFile
+
+                // Build map: baseName -> relative XML directory path
+                val xmlDirMap = mutableMapOf<String, String>()
+                xmlDir.walkTopDown()
+                    .filter { it.isFile && it.extension == "xml" }
+                    .forEach { xmlFile ->
+                        val baseName = xmlFile.nameWithoutExtension
+                        val relativeDir = xmlFile.parentFile.relativeTo(xmlDir).path
+                        xmlDirMap[baseName] = relativeDir
+                    }
+
+                // Package each BRS file alongside its XML
+                if (componentsDir.exists()) {
+                    componentsDir.walkTopDown()
+                        .filter { it.isFile && it.extension == "brs" }
+                        .forEach { brsFile ->
+                            val baseName = brsFile.nameWithoutExtension
+                            val targetDir = xmlDirMap[baseName] ?: ""
+                            val targetPath = if (targetDir.isEmpty()) {
+                                "components/${brsFile.name}"
+                            } else {
+                                "components/$targetDir/${brsFile.name}"
+                            }
+                            addToZip(zip, brsFile, targetPath)
+                        }
+                }
+            } else if (compiledComponents.isPresent) {
+                // Fallback: use original behavior if no XML dir provided
                 val componentsDir = compiledComponents.get().asFile
                 if (componentsDir.exists()) {
                     componentsDir.walkTopDown().filter { it.isFile && it.extension == "brs" }.forEach { file ->
