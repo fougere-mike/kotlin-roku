@@ -25,8 +25,8 @@ import org.jetbrains.kotlin.gradle.plugin.KotlinMultiplatformPluginWrapper
 import org.jetbrains.kotlin.gradle.plugin.KotlinSourceSet
 import org.jetbrains.kotlin.gradle.plugin.ide.IdeDependencyResolver
 import org.jetbrains.kotlin.gradle.plugin.ide.IdeMultiplatformImport
-import org.jetbrains.kotlin.gradle.dsl.KotlinBrsCompilerOptions
 import org.jetbrains.kotlin.gradle.targets.brs.KotlinBrsCompile
+import org.jetbrains.kotlin.gradle.targets.brs.KotlinBrsIrTarget
 import java.util.Properties
 import java.util.zip.ZipFile
 
@@ -54,6 +54,18 @@ class RokuPlugin : Plugin<Project> {
 
         // Apply BRS target
         kotlinExt.brs()
+
+        // Create the components compilation for SceneGraph component Kotlin files
+        val brsTarget = kotlinExt.targets.getByName("brs") as KotlinBrsIrTarget
+        val componentsCompilation = brsTarget.compilations.create("components")
+
+        // Configure brsComponents source set to use components/ directory
+        val brsComponentsSourceSet = componentsCompilation.defaultSourceSet
+        brsComponentsSourceSet.kotlin.srcDir(rokuExtension.componentsDir)
+
+        // Make brsComponents depend on brsMain for symbol visibility
+        val brsMainSourceSet = kotlinExt.sourceSets.getByName("brsMain")
+        brsComponentsSourceSet.dependsOn(brsMainSourceSet)
 
         // Create a configuration to resolve the BRS compiler JAR
         val brsCompilerConfig = project.configurations.create("brsCompiler") {
@@ -96,14 +108,17 @@ class RokuPlugin : Plugin<Project> {
             "org.jetbrains.kotlin:kotlin-stdlib-brs:$kotlinVersion:brs-runtime"
         )
 
-        // Configure the BRS compile task with the compiler JAR and stdlib
-        project.afterEvaluate {
-            project.tasks.withType(KotlinBrsCompile::class.java).configureEach {
-                val compilerJarFile = brsCompilerConfig.singleFile
-                compilerJar.set(compilerJarFile)
+        // Configure all BRS compile tasks with the compiler JAR and stdlib
+        project.tasks.withType(KotlinBrsCompile::class.java).configureEach {
+            compilerJar.fileProvider(project.provider { brsCompilerConfig.singleFile })
+            libraries.from(brsStdlibConfig)
 
-                // Add stdlib to libraries
-                libraries.from(brsStdlibConfig)
+            // Additional configuration for the components compile task
+            if (name == "compileKotlinBrsComponents") {
+                // Add main compiled output as library so components can reference main classes
+                libraries.from(project.layout.buildDirectory.dir("brs/brs/main/source"))
+                // Output to same location as before for packaging compatibility
+                outputDirectory.set(project.layout.buildDirectory.dir("brs/brs/main/components"))
             }
         }
 
@@ -152,40 +167,6 @@ class RokuPlugin : Plugin<Project> {
         // Compiled main source directory (for dependency tracking)
         val compiledMainSourceDir = project.layout.buildDirectory.dir("brs/brs/main/source")
 
-        // Component compile task: compiles .kt files from components/ to components/*.brs
-        // Create compiler options using reflection (the Default class is internal)
-        val compilerOptionsClass = Class.forName("org.jetbrains.kotlin.gradle.dsl.KotlinBrsCompilerOptionsDefault")
-        val componentCompilerOptions = project.objects.newInstance(compilerOptionsClass) as KotlinBrsCompilerOptions
-        val compileComponentsTask = project.tasks.register(
-            "compileKotlinBrsComponents",
-            KotlinBrsCompile::class.java,
-            componentCompilerOptions
-        ).apply {
-            configure {
-                group = "roku"
-                description = "Compile component Kotlin files to BrightScript"
-
-                // Only compile .kt files from components directory
-                // Use source() method from AbstractKotlinCompileTool base class
-                source(project.fileTree(extension.componentsDir) {
-                    include("**/*.kt")
-                })
-
-                // Output to components directory structure
-                outputDirectory.set(compiledComponentsDirProvider)
-
-                // Must run after main compilation so it can reference main source classes
-                dependsOn("compileKotlinBrs")
-
-                // Configure compiler - use lazy providers to avoid afterEvaluate
-                compilerJar.fileProvider(project.provider { brsCompilerConfig.singleFile })
-                compilerClasspath.from(brsCompilerConfig)
-                // Include stdlib + main compiled output as libraries
-                libraries.from(brsStdlibConfig)
-                libraries.from(compiledMainSourceDir)
-            }
-        }
-
         // Process component XML task: injects script imports
         val processComponentXmlTask = project.tasks.register("processComponentXml", ProcessComponentXmlTask::class.java).apply {
             configure {
@@ -194,7 +175,7 @@ class RokuPlugin : Plugin<Project> {
 
                 // Must run after both compile tasks
                 dependsOn("compileKotlinBrs")
-                dependsOn(compileComponentsTask)
+                dependsOn("compileKotlinBrsComponents")
 
                 sourceXmlDir.set(extension.componentsDir)
                 compiledComponentsDir.set(compiledComponentsDirProvider)
@@ -214,7 +195,7 @@ class RokuPlugin : Plugin<Project> {
 
                 // Depend on all compile tasks and XML processing
                 dependsOn("compileKotlinBrs")
-                dependsOn(compileComponentsTask)
+                dependsOn("compileKotlinBrsComponents")
                 dependsOn(processComponentXmlTask)
 
                 compiledBrs.set(project.layout.buildDirectory.dir("brs/brs/main/source"))
@@ -294,7 +275,7 @@ class RokuPlugin : Plugin<Project> {
                 project.tasks.findByName("compileTestKotlinBrs")?.let {
                     dependsOn(it)
                 } ?: dependsOn("compileKotlinBrs")
-                dependsOn(compileComponentsTask)
+                dependsOn("compileKotlinBrsComponents")
                 dependsOn(processComponentXmlTask)
 
                 // Use test source output if available, otherwise main
