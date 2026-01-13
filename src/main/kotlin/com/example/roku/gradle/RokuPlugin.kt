@@ -114,7 +114,9 @@ class RokuPlugin : Plugin<Project> {
             libraries.from(brsStdlibConfig)
 
             // Additional configuration for the components compile task
-            if (name == "compileKotlinBrsComponents") {
+            if (name == "compileComponentsKotlinBrs") {
+                // Components depend on main compilation output
+                dependsOn("compileKotlinBrs")
                 // Add main compiled output as library so components can reference main classes
                 libraries.from(project.layout.buildDirectory.dir("brs/brs/main/source"))
                 // Output to same location as before for packaging compatibility
@@ -175,7 +177,7 @@ class RokuPlugin : Plugin<Project> {
 
                 // Must run after both compile tasks
                 dependsOn("compileKotlinBrs")
-                dependsOn("compileKotlinBrsComponents")
+                dependsOn("compileComponentsKotlinBrs")
 
                 sourceXmlDir.set(extension.componentsDir)
                 compiledComponentsDir.set(compiledComponentsDirProvider)
@@ -195,7 +197,7 @@ class RokuPlugin : Plugin<Project> {
 
                 // Depend on all compile tasks and XML processing
                 dependsOn("compileKotlinBrs")
-                dependsOn("compileKotlinBrsComponents")
+                dependsOn("compileComponentsKotlinBrs")
                 dependsOn(processComponentXmlTask)
 
                 compiledBrs.set(project.layout.buildDirectory.dir("brs/brs/main/source"))
@@ -275,7 +277,7 @@ class RokuPlugin : Plugin<Project> {
                 project.tasks.findByName("compileTestKotlinBrs")?.let {
                     dependsOn(it)
                 } ?: dependsOn("compileKotlinBrs")
-                dependsOn("compileKotlinBrsComponents")
+                dependsOn("compileComponentsKotlinBrs")
                 dependsOn(processComponentXmlTask)
 
                 // Use test source output if available, otherwise main
