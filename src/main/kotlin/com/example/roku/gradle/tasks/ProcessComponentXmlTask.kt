@@ -18,17 +18,76 @@ import org.xml.sax.InputSource
  * Processes SceneGraph component XML files to inject script imports and interface sections.
  *
  * For each XML file, this task:
- * 1. Finds the corresponding compiled .brs file (if any)
- * 2. Analyzes the .brs to determine ALL dependencies:
- *    - Stdlib files (e.g., ArrayList.brs, coreRuntime.brs)
- *    - User code from main source (e.g., User.brs, ApiClient.brs)
- *    - Other component files
+ * 1. Reads deps.json from compiler output (if available) OR falls back to regex analysis
+ * 2. Finds the corresponding compiled .brs file (if any)
  * 3. Merges <interface> section from compiler-generated XML (if any)
  * 4. Injects <script> tags for all required .brs files
  * 5. Writes processed XML to the output directory
  */
 @CacheableTask
 abstract class ProcessComponentXmlTask : DefaultTask() {
+
+    companion object {
+        /**
+         * Core runtime files that should always be included when runtime functions are used.
+         */
+        private val CORE_RUNTIME_FILES = setOf(
+            "coreRuntime.brs",
+            "intrinsics.brs",
+            "primitives.brs",
+            "Kotlin.brs",
+            "console.brs",
+            // ArraysBrs contains runtime helpers (__kotlin_nextObjectId, __kotlin_isInstanceOf, etc.)
+            // needed by most stdlib classes
+            "ArraysBrs.brs",
+            // Preconditions contains bounds checking functions (checkElementIndex, etc.)
+            // used by collections like ArrayList
+            "Preconditions.brs",
+            // Exceptions contains exception classes used throughout stdlib
+            "Exceptions.brs",
+            // StringBuilder is commonly used by toString implementations
+            "StringBuilder.brs"
+        )
+
+        /**
+         * Maps top-level stdlib function prefixes to their source .brs files.
+         * Used as fallback when deps.json is not available.
+         * These functions don't follow the ClassName_methodName pattern, so
+         * the naive "look for FunctionName.brs" heuristic doesn't work.
+         */
+        private val STDLIB_FUNCTION_TO_FILE = mapOf(
+            // ArrayList.brs - list builders
+            "mutableListOf" to "ArrayList.brs",
+            "listOf" to "ArrayList.brs",
+            "arrayListOf" to "ArrayList.brs",
+            "emptyList" to "ArrayList.brs",
+
+            // HashMap.brs - map builders
+            "mutableMapOf" to "HashMap.brs",
+            "mapOf" to "HashMap.brs",
+            "hashMapOf" to "HashMap.brs",
+            "emptyMap" to "HashMap.brs",
+
+            // HashSet.brs - set builders
+            "mutableSetOf" to "HashSet.brs",
+            "setOf" to "HashSet.brs",
+            "hashSetOf" to "HashSet.brs",
+            "emptySet" to "HashSet.brs",
+
+            // LinkedHashMap.brs
+            "linkedMapOf" to "LinkedHashMap.brs"
+        )
+    }
+
+    /**
+     * Parsed component dependency manifest from deps.json.
+     */
+    data class ComponentDeps(
+        val version: Int,
+        val component: String,
+        val dependencies: List<String>,
+        val runtimeFunctions: List<String>
+    )
 
     @get:InputDirectory
     @get:PathSensitive(PathSensitivity.RELATIVE)
@@ -133,7 +192,8 @@ abstract class ProcessComponentXmlTask : DefaultTask() {
                         stdlibFileNames,
                         mainSourceFileNames,
                         componentFileNames,
-                        brsRelativePath
+                        brsRelativePath,
+                        compilerXmlDir
                     )
                 } else {
                     DependencyResult(emptySet(), emptySet(), emptySet())
@@ -168,10 +228,143 @@ abstract class ProcessComponentXmlTask : DefaultTask() {
     }
 
     /**
-     * Analyzes a compiled BRS file to find all dependencies.
-     * Looks for function calls that match available .brs files.
+     * Loads and parses a deps.json file from the compiler output.
+     * Returns null if the file doesn't exist or can't be parsed.
+     */
+    private fun loadComponentDeps(compilerXmlDir: File?, componentName: String): ComponentDeps? {
+        if (compilerXmlDir == null) return null
+
+        // deps.json is in components/ComponentName/ComponentName.deps.json
+        val depsFile = File(compilerXmlDir, "$componentName/$componentName.deps.json")
+        if (!depsFile.exists()) return null
+
+        return try {
+            val content = depsFile.readText()
+            parseComponentDeps(content)
+        } catch (e: Exception) {
+            logger.warn("Failed to parse deps.json for $componentName: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Parses deps.json content into a ComponentDeps object.
+     * Simple JSON parsing without external dependencies.
+     */
+    private fun parseComponentDeps(json: String): ComponentDeps {
+        // Simple regex-based JSON parsing (avoiding external dependencies)
+        val versionMatch = Regex(""""version"\s*:\s*(\d+)""").find(json)
+        val componentMatch = Regex(""""component"\s*:\s*"([^"]+)"""").find(json)
+        val depsMatch = Regex(""""dependencies"\s*:\s*\[(.*?)\]""", RegexOption.DOT_MATCHES_ALL).find(json)
+        val runtimeMatch = Regex(""""runtimeFunctions"\s*:\s*\[(.*?)\]""", RegexOption.DOT_MATCHES_ALL).find(json)
+
+        val version = versionMatch?.groupValues?.get(1)?.toIntOrNull() ?: 1
+        val component = componentMatch?.groupValues?.get(1) ?: ""
+
+        val dependencies = depsMatch?.groupValues?.get(1)
+            ?.let { extractStringArray(it) } ?: emptyList()
+
+        val runtimeFunctions = runtimeMatch?.groupValues?.get(1)
+            ?.let { extractStringArray(it) } ?: emptyList()
+
+        return ComponentDeps(version, component, dependencies, runtimeFunctions)
+    }
+
+    /**
+     * Extracts string values from a JSON array content.
+     */
+    private fun extractStringArray(arrayContent: String): List<String> {
+        return Regex(""""([^"]+)"""").findAll(arrayContent)
+            .map { it.groupValues[1] }
+            .toList()
+    }
+
+    /**
+     * Analyzes dependencies for a component.
+     * First tries to read deps.json from compiler output (accurate).
+     * Falls back to regex-based analysis (heuristic).
      */
     private fun analyzeDependencies(
+        brsFile: File,
+        stdlibFileNames: Set<String>,
+        mainSourceFileNames: Set<String>,
+        componentFileNames: Set<String>,
+        currentComponentPath: String,
+        compilerXmlDir: File?
+    ): DependencyResult {
+        val componentName = brsFile.nameWithoutExtension
+
+        // Try to load deps.json first (compiler-generated, accurate)
+        val componentDeps = loadComponentDeps(compilerXmlDir, componentName)
+
+        if (componentDeps != null) {
+            logger.lifecycle("Using compiler-generated deps.json for $componentName")
+            return analyzeDependenciesFromManifest(
+                componentDeps,
+                stdlibFileNames,
+                mainSourceFileNames,
+                componentFileNames,
+                currentComponentPath
+            )
+        }
+
+        // Fall back to regex-based analysis
+        return analyzeDependenciesFromRegex(
+            brsFile,
+            stdlibFileNames,
+            mainSourceFileNames,
+            componentFileNames,
+            currentComponentPath
+        )
+    }
+
+    /**
+     * Analyzes dependencies using the compiler-generated deps.json manifest.
+     */
+    private fun analyzeDependenciesFromManifest(
+        componentDeps: ComponentDeps,
+        stdlibFileNames: Set<String>,
+        mainSourceFileNames: Set<String>,
+        componentFileNames: Set<String>,
+        currentComponentPath: String
+    ): DependencyResult {
+        val requiredStdlib = mutableSetOf<String>()
+        val requiredMainSource = mutableSetOf<String>()
+        val requiredComponents = mutableSetOf<String>()
+
+        // Categorize dependencies from the manifest
+        for (dep in componentDeps.dependencies) {
+            when {
+                stdlibFileNames.contains(dep) -> requiredStdlib.add(dep)
+                mainSourceFileNames.contains(dep) -> requiredMainSource.add(dep)
+                componentFileNames.contains(dep) && dep != currentComponentPath -> requiredComponents.add(dep)
+            }
+        }
+
+        // If any runtime functions are used, include core runtime files
+        if (componentDeps.runtimeFunctions.isNotEmpty()) {
+            for (coreFile in CORE_RUNTIME_FILES) {
+                if (stdlibFileNames.any { it.equals(coreFile, ignoreCase = true) }) {
+                    requiredStdlib.add(stdlibFileNames.first { it.equals(coreFile, ignoreCase = true) })
+                }
+            }
+        }
+
+        // Always include basic core runtime for any component with code
+        for (coreFile in CORE_RUNTIME_FILES) {
+            stdlibFileNames.firstOrNull { it.equals(coreFile, ignoreCase = true) }?.let {
+                requiredStdlib.add(it)
+            }
+        }
+
+        return DependencyResult(requiredStdlib, requiredMainSource, requiredComponents)
+    }
+
+    /**
+     * Analyzes a compiled BRS file to find all dependencies using regex.
+     * Fallback when deps.json is not available.
+     */
+    private fun analyzeDependenciesFromRegex(
         brsFile: File,
         stdlibFileNames: Set<String>,
         mainSourceFileNames: Set<String>,
@@ -189,10 +382,18 @@ abstract class ProcessComponentXmlTask : DefaultTask() {
 
         // Match against stdlib files
         val requiredStdlib = mutableSetOf<String>()
-        for (stdlibFile in stdlibFileNames) {
-            val baseName = stdlibFile.removeSuffix(".brs")
-            if (calledModules.contains(baseName)) {
-                requiredStdlib.add(stdlibFile)
+        for (calledModule in calledModules) {
+            // Check explicit function-to-file mapping first (for top-level functions)
+            STDLIB_FUNCTION_TO_FILE[calledModule]?.let { file ->
+                if (stdlibFileNames.contains(file)) {
+                    requiredStdlib.add(file)
+                }
+            }
+
+            // Fall back to filename matching (for ClassName_methodName pattern)
+            val matchingFile = "${calledModule}.brs"
+            if (stdlibFileNames.contains(matchingFile)) {
+                requiredStdlib.add(matchingFile)
             }
         }
 
