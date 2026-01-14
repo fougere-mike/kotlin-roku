@@ -30,23 +30,24 @@ abstract class ProcessComponentXmlTask : DefaultTask() {
     companion object {
         /**
          * Core runtime files that should always be included when runtime functions are used.
+         * Note: Kotlin compiler appends "Kt" suffix to all output .brs files.
          */
         private val CORE_RUNTIME_FILES = setOf(
-            "coreRuntime.brs",
-            "intrinsics.brs",
-            "primitives.brs",
-            "Kotlin.brs",
-            "console.brs",
+            "coreRuntimeKt.brs",
+            "intrinsicsKt.brs",
+            "primitivesKt.brs",
+            "KotlinKt.brs",
+            "consoleKt.brs",
             // ArraysBrs contains runtime helpers (__kotlin_nextObjectId, __kotlin_isInstanceOf, etc.)
             // needed by most stdlib classes
-            "ArraysBrs.brs",
+            "ArraysBrsKt.brs",
             // Preconditions contains bounds checking functions (checkElementIndex, etc.)
             // used by collections like ArrayList
-            "Preconditions.brs",
+            "PreconditionsKt.brs",
             // Exceptions contains exception classes used throughout stdlib
-            "Exceptions.brs",
+            "ExceptionsKt.brs",
             // StringBuilder is commonly used by toString implementations
-            "StringBuilder.brs"
+            "StringBuilderKt.brs"
         )
 
         /**
@@ -54,28 +55,29 @@ abstract class ProcessComponentXmlTask : DefaultTask() {
          * Used as fallback when deps.json is not available.
          * These functions don't follow the ClassName_methodName pattern, so
          * the naive "look for FunctionName.brs" heuristic doesn't work.
+         * Note: Kotlin compiler appends "Kt" suffix to all output .brs files.
          */
         private val STDLIB_FUNCTION_TO_FILE = mapOf(
-            // ArrayList.brs - list builders
-            "mutableListOf" to "ArrayList.brs",
-            "listOf" to "ArrayList.brs",
-            "arrayListOf" to "ArrayList.brs",
-            "emptyList" to "ArrayList.brs",
+            // ArrayListKt.brs - list builders
+            "mutableListOf" to "ArrayListKt.brs",
+            "listOf" to "ArrayListKt.brs",
+            "arrayListOf" to "ArrayListKt.brs",
+            "emptyList" to "ArrayListKt.brs",
 
-            // HashMap.brs - map builders
-            "mutableMapOf" to "HashMap.brs",
-            "mapOf" to "HashMap.brs",
-            "hashMapOf" to "HashMap.brs",
-            "emptyMap" to "HashMap.brs",
+            // HashMapKt.brs - map builders
+            "mutableMapOf" to "HashMapKt.brs",
+            "mapOf" to "HashMapKt.brs",
+            "hashMapOf" to "HashMapKt.brs",
+            "emptyMap" to "HashMapKt.brs",
 
-            // HashSet.brs - set builders
-            "mutableSetOf" to "HashSet.brs",
-            "setOf" to "HashSet.brs",
-            "hashSetOf" to "HashSet.brs",
-            "emptySet" to "HashSet.brs",
+            // HashSetKt.brs - set builders
+            "mutableSetOf" to "HashSetKt.brs",
+            "setOf" to "HashSetKt.brs",
+            "hashSetOf" to "HashSetKt.brs",
+            "emptySet" to "HashSetKt.brs",
 
-            // LinkedHashMap.brs
-            "linkedMapOf" to "LinkedHashMap.brs"
+            // LinkedHashMapKt.brs
+            "linkedMapOf" to "LinkedHashMapKt.brs"
         )
     }
 
@@ -176,7 +178,8 @@ abstract class ProcessComponentXmlTask : DefaultTask() {
                 val outputFile = File(outputDir, relativePath.path)
 
                 // Find corresponding .brs file by name (compiler may flatten directory structure)
-                val expectedBrsName = xmlFile.nameWithoutExtension + ".brs"
+                // Kotlin compiler now appends "Kt" suffix to output files
+                val expectedBrsName = xmlFile.nameWithoutExtension + "Kt.brs"
                 val componentBrsFile = brsFilesByName[expectedBrsName]
                 val hasComponentBrs = componentBrsFile?.exists() == true
 
@@ -391,19 +394,21 @@ abstract class ProcessComponentXmlTask : DefaultTask() {
             }
 
             // Fall back to filename matching (for ClassName_methodName pattern)
-            val matchingFile = "${calledModule}.brs"
+            // Note: Kotlin compiler appends "Kt" suffix to all output .brs files
+            val matchingFile = "${calledModule}Kt.brs"
             if (stdlibFileNames.contains(matchingFile)) {
                 requiredStdlib.add(matchingFile)
             }
         }
 
         // Always include core runtime files for any component with code
+        // Note: Kotlin compiler appends "Kt" suffix to all output .brs files
         val coreRuntimeFiles = stdlibFileNames.filter { name ->
-            name.equals("coreRuntime.brs", ignoreCase = true) ||
-            name.equals("intrinsics.brs", ignoreCase = true) ||
-            name.equals("primitives.brs", ignoreCase = true) ||
-            name.equals("Kotlin.brs", ignoreCase = true) ||
-            name.equals("console.brs", ignoreCase = true)
+            name.equals("coreRuntimeKt.brs", ignoreCase = true) ||
+            name.equals("intrinsicsKt.brs", ignoreCase = true) ||
+            name.equals("primitivesKt.brs", ignoreCase = true) ||
+            name.equals("KotlinKt.brs", ignoreCase = true) ||
+            name.equals("consoleKt.brs", ignoreCase = true)
         }
         requiredStdlib.addAll(coreRuntimeFiles)
 
@@ -481,8 +486,9 @@ abstract class ProcessComponentXmlTask : DefaultTask() {
             }
 
             // Component's own BRS file LAST (can now call stdlib functions in init())
+            // Note: Kotlin compiler appends "Kt" suffix to all output .brs files
             if (hasComponentBrs) {
-                val brsPath = xmlRelativePath.replace(".xml", ".brs")
+                val brsPath = xmlRelativePath.replace(".xml", "Kt.brs")
                 appendLine("  <script type=\"text/brightscript\" uri=\"pkg:/components/$brsPath\"/>")
             }
         }
