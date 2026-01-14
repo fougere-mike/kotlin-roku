@@ -1,6 +1,7 @@
 package com.example.roku.gradle
 
 import com.example.roku.gradle.tasks.CompileBrighterScriptTask
+import com.example.roku.gradle.tasks.CopyKotlinToBsTask
 import com.example.roku.gradle.tasks.DeleteRokuTask
 import com.example.roku.gradle.tasks.DeviceLogTask
 import com.example.roku.gradle.tasks.InstallRokuTask
@@ -379,31 +380,73 @@ class RokuPlugin : Plugin<Project> {
      * Registers tasks for hybrid BrighterScript + Kotlin builds.
      *
      * When brighterScriptEnabled is true, this sets up:
-     * 1. compileBrighterScript - Runs bsc to compile BrighterScript sources
-     * 2. mergeBrsOutput - Merges Kotlin and BrighterScript outputs
-     * 3. buildHybrid - Convenience task for full hybrid build
+     * 1. copyKotlinToBrighterScript - Copies Kotlin output to BSC source directory
+     * 2. compileBrighterScript - Runs bsc to compile BrighterScript sources (after Kotlin)
+     * 3. mergeBrsOutput - Merges Kotlin and BrighterScript outputs
+     * 4. buildHybrid - Convenience task for full hybrid build
      *
-     * The task graph becomes:
-     *   compileBrighterScript
+     * The task graph is SEQUENTIAL to allow BSC to see Kotlin-generated functions:
+     *   compileKotlinBrs
      *           ↓
-     *   compileKotlinBrs → compileComponentsKotlinBrs
+     *   compileComponentsKotlinBrs
+     *           ↓
+     *   copyKotlinToBrighterScript (copies .brs files to src/kotlin-generated/)
+     *           ↓
+     *   compileBrighterScript (now sees Kotlin functions - no lint errors!)
      *           ↓
      *   mergeBrsOutput
      *           ↓
-     *   packageRoku (reconfigured to use merged output)
+     *   packageHybridRoku
+     *
+     * This eliminates the need for 'bs:disable-line' comments when calling Kotlin from BSC.
      */
     private fun registerHybridBuildTasks(
         project: Project,
         extension: RokuExtension,
         brsRuntimeConfig: org.gradle.api.artifacts.Configuration
     ) {
-        project.logger.lifecycle("[RokuPlugin] BrighterScript integration enabled")
+        project.logger.lifecycle("[RokuPlugin] BrighterScript integration enabled (sequential build mode)")
 
-        // Task 1: Compile BrighterScript sources
+        // Stdlib BRS files provider - needed so BSC can see stdlib functions
+        val stdlibBrsFilesProvider = project.provider {
+            val runtimeJar = brsRuntimeConfig.resolve().firstOrNull()
+            if (runtimeJar != null && runtimeJar.exists()) {
+                project.zipTree(runtimeJar)
+            } else {
+                project.files()
+            }
+        }
+
+        // Task 1: Copy Kotlin-compiled .brs files to BrighterScript source directory
+        // This runs BEFORE BSC so it can see Kotlin-generated functions
+        val copyKotlinTask = project.tasks.register("copyKotlinToBrighterScript", CopyKotlinToBsTask::class.java).apply {
+            configure {
+                group = "roku"
+                description = "Copy Kotlin-compiled BRS files to BrighterScript source directory"
+
+                // Wait for Kotlin compilation to finish
+                dependsOn("compileKotlinBrs")
+                dependsOn("compileComponentsKotlinBrs")
+
+                kotlinBrsSource.set(project.layout.buildDirectory.dir("brs/brs/main/source"))
+                // Copy to source/kotlin/ subdirectory to ensure BSC includes them in the main source scope
+                // (BSC scopes files by directory - kotlin-generated/ would be a separate scope)
+                brighterScriptKotlinDir.set(extension.brighterScriptSourceDir.map {
+                    it.dir("source/kotlin")
+                })
+                // Include stdlib runtime files so BSC can resolve stdlib function calls
+                stdlibBrsFiles.from(stdlibBrsFilesProvider)
+            }
+        }
+
+        // Task 2: Compile BrighterScript sources - NOW runs AFTER Kotlin copy
         val compileBsTask = project.tasks.register("compileBrighterScript", CompileBrighterScriptTask::class.java).apply {
             configure {
                 group = "roku"
                 description = "Compile BrighterScript sources using bsc"
+
+                // Sequential: wait for Kotlin files to be copied
+                dependsOn(copyKotlinTask)
 
                 // Look for bsconfig.json in project directory
                 val bsConfig = project.file("bsconfig.json")
@@ -418,16 +461,14 @@ class RokuPlugin : Plugin<Project> {
             }
         }
 
-        // Task 2: Merge Kotlin and BrighterScript outputs
+        // Task 3: Merge Kotlin and BrighterScript outputs
         val mergeTask = project.tasks.register("mergeBrsOutput", MergeBrsOutputTask::class.java).apply {
             configure {
                 group = "roku"
                 description = "Merge Kotlin and BrighterScript compiled outputs"
 
-                // Depends on both compilations
+                // Only depends on BSC now since BSC already depends on Kotlin via copyKotlinTask
                 dependsOn(compileBsTask)
-                dependsOn("compileKotlinBrs")
-                dependsOn("compileComponentsKotlinBrs")
 
                 kotlinBrsSource.set(project.layout.buildDirectory.dir("brs/brs/main/source"))
                 kotlinBrsComponents.set(project.layout.buildDirectory.dir("brs/brs/main/components"))
@@ -436,17 +477,7 @@ class RokuPlugin : Plugin<Project> {
             }
         }
 
-        // Stdlib BRS files provider for merge/package task
-        val stdlibBrsFilesProvider = project.provider {
-            val runtimeJar = brsRuntimeConfig.resolve().firstOrNull()
-            if (runtimeJar != null && runtimeJar.exists()) {
-                project.zipTree(runtimeJar)
-            } else {
-                project.files()
-            }
-        }
-
-        // Configure merge task with stdlib files
+        // Configure merge task with stdlib files (reuse provider from above)
         mergeTask.configure {
             stdlibBrsFiles.from(stdlibBrsFilesProvider)
         }
@@ -544,7 +575,17 @@ class RokuPlugin : Plugin<Project> {
             dependsOn(packageHybridTask)
         }
 
-        project.logger.lifecycle("[RokuPlugin] Registered hybrid build tasks: compileBrighterScript, mergeBrsOutput, packageHybridRoku, installHybridRoku, buildHybrid")
+        // Task 6: Clean source/kotlin/ directory on Gradle clean
+        project.tasks.findByName("clean")?.doLast {
+            val kotlinGenDir = extension.brighterScriptSourceDir.get().dir("source/kotlin").asFile
+            if (kotlinGenDir.exists()) {
+                kotlinGenDir.deleteRecursively()
+                project.logger.lifecycle("[RokuPlugin] Cleaned source/kotlin directory: ${kotlinGenDir.absolutePath}")
+            }
+        }
+
+        project.logger.lifecycle("[RokuPlugin] Registered hybrid build tasks: copyKotlinToBrighterScript, compileBrighterScript, mergeBrsOutput, packageHybridRoku, installHybridRoku, buildHybrid")
+        project.logger.lifecycle("[RokuPlugin] Kotlin files will be copied to source/kotlin/ for BSC visibility")
     }
 
     private fun loadLocalProperties(project: Project): Properties {

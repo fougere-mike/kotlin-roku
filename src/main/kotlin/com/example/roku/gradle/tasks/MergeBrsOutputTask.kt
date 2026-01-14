@@ -89,7 +89,16 @@ abstract class MergeBrsOutputTask : DefaultTask() {
             sourceDir.mkdirs()
         }
 
-        if (ktSource.exists()) {
+        // Check if hybrid mode already copied Kotlin files via BSC
+        // In hybrid mode, copyKotlinToBrighterScript puts files in source/kotlin/
+        // BSC then compiles them, so they're already in the output
+        val kotlinSubdir = File(sourceDir, "kotlin")
+        val hybridModeActive = kotlinSubdir.exists() &&
+            kotlinSubdir.listFiles()?.any { it.extension == "brs" } == true
+
+        if (hybridModeActive) {
+            logger.lifecycle("Skipping Kotlin source overlay - already processed by BSC (hybrid mode)")
+        } else if (ktSource.exists()) {
             var overlayCount = 0
             ktSource.walkTopDown()
                 .filter { it.isFile && it.extension == "brs" }
@@ -162,42 +171,49 @@ abstract class MergeBrsOutputTask : DefaultTask() {
         }
 
         // Step 4: Copy Kotlin stdlib runtime .brs files into source/
-        val stdlibFiles = stdlibBrsFiles.files.flatMap { file ->
-            if (file.isDirectory) {
-                file.walkTopDown().filter { it.isFile && it.extension == "brs" }.toList()
-            } else if (file.extension == "brs") {
-                listOf(file)
-            } else {
-                emptyList()
-            }
-        }
-
-        if (stdlibFiles.isNotEmpty()) {
-            var stdlibCount = 0
-            var skippedCount = 0
-            var emptyCount = 0
-            stdlibFiles.forEach { brsFile ->
-                // Skip empty files - they cause BrightScript compilation errors
-                if (brsFile.length() == 0L) {
-                    emptyCount++
-                    logger.debug("  Skipped empty stdlib file: ${brsFile.name}")
-                    return@forEach
-                }
-
-                val destFile = File(sourceDir, brsFile.name)
-                // Case-insensitive check for existing files
-                val existingFile = sourceDir.listFiles()?.find {
-                    it.name.equals(brsFile.name, ignoreCase = true)
-                }
-                if (existingFile != null) {
-                    skippedCount++
-                    logger.lifecycle("  Skipped stdlib file (already exists): ${brsFile.name}")
+        // Skip this step if stdlib files already exist in a subdirectory (e.g., source/kotlin/)
+        // This happens in hybrid mode where copyKotlinToBrighterScript already added them
+        // Reuse hybridModeActive check from Step 2
+        if (hybridModeActive) {
+            logger.lifecycle("Skipping stdlib copy - already present in source/kotlin/ (hybrid mode)")
+        } else {
+            val stdlibFiles = stdlibBrsFiles.files.flatMap { file ->
+                if (file.isDirectory) {
+                    file.walkTopDown().filter { it.isFile && it.extension == "brs" }.toList()
+                } else if (file.extension == "brs") {
+                    listOf(file)
                 } else {
-                    brsFile.copyTo(destFile)
-                    stdlibCount++
+                    emptyList()
                 }
             }
-            logger.lifecycle("Added $stdlibCount Kotlin stdlib runtime files (skipped $skippedCount existing, $emptyCount empty)")
+
+            if (stdlibFiles.isNotEmpty()) {
+                var stdlibCount = 0
+                var skippedCount = 0
+                var emptyCount = 0
+                stdlibFiles.forEach { brsFile ->
+                    // Skip empty files - they cause BrightScript compilation errors
+                    if (brsFile.length() == 0L) {
+                        emptyCount++
+                        logger.debug("  Skipped empty stdlib file: ${brsFile.name}")
+                        return@forEach
+                    }
+
+                    val destFile = File(sourceDir, brsFile.name)
+                    // Case-insensitive check for existing files
+                    val existingFile = sourceDir.listFiles()?.find {
+                        it.name.equals(brsFile.name, ignoreCase = true)
+                    }
+                    if (existingFile != null) {
+                        skippedCount++
+                        logger.lifecycle("  Skipped stdlib file (already exists): ${brsFile.name}")
+                    } else {
+                        brsFile.copyTo(destFile)
+                        stdlibCount++
+                    }
+                }
+                logger.lifecycle("Added $stdlibCount Kotlin stdlib runtime files (skipped $skippedCount existing, $emptyCount empty)")
+            }
         }
 
         logger.lifecycle("Merge complete: ${output.absolutePath}")
