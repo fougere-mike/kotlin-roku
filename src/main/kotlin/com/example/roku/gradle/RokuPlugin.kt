@@ -1,8 +1,10 @@
 package com.example.roku.gradle
 
+import com.example.roku.gradle.tasks.CompileBrighterScriptTask
 import com.example.roku.gradle.tasks.DeleteRokuTask
 import com.example.roku.gradle.tasks.DeviceLogTask
 import com.example.roku.gradle.tasks.InstallRokuTask
+import com.example.roku.gradle.tasks.MergeBrsOutputTask
 import com.example.roku.gradle.tasks.PackageRokuTask
 import com.example.roku.gradle.tasks.ProcessComponentXmlTask
 import com.example.roku.gradle.tasks.RunRokuTestsTask
@@ -126,6 +128,13 @@ class RokuPlugin : Plugin<Project> {
 
         // Register tasks
         registerTasks(project, rokuExtension, rokuTestExtension, brsRuntimeConfig, brsCompilerConfig, brsStdlibConfig)
+
+        // Register hybrid build tasks if BrighterScript is enabled
+        project.afterEvaluate {
+            if (rokuExtension.brighterScriptEnabled.get()) {
+                registerHybridBuildTasks(project, rokuExtension, brsRuntimeConfig)
+            }
+        }
     }
 
     private fun registerTasks(
@@ -364,6 +373,178 @@ class RokuPlugin : Plugin<Project> {
             description = "Build, install, and run all Roku tests"
             dependsOn(runTestsTask)
         }
+    }
+
+    /**
+     * Registers tasks for hybrid BrighterScript + Kotlin builds.
+     *
+     * When brighterScriptEnabled is true, this sets up:
+     * 1. compileBrighterScript - Runs bsc to compile BrighterScript sources
+     * 2. mergeBrsOutput - Merges Kotlin and BrighterScript outputs
+     * 3. buildHybrid - Convenience task for full hybrid build
+     *
+     * The task graph becomes:
+     *   compileBrighterScript
+     *           ↓
+     *   compileKotlinBrs → compileComponentsKotlinBrs
+     *           ↓
+     *   mergeBrsOutput
+     *           ↓
+     *   packageRoku (reconfigured to use merged output)
+     */
+    private fun registerHybridBuildTasks(
+        project: Project,
+        extension: RokuExtension,
+        brsRuntimeConfig: org.gradle.api.artifacts.Configuration
+    ) {
+        project.logger.lifecycle("[RokuPlugin] BrighterScript integration enabled")
+
+        // Task 1: Compile BrighterScript sources
+        val compileBsTask = project.tasks.register("compileBrighterScript", CompileBrighterScriptTask::class.java).apply {
+            configure {
+                group = "roku"
+                description = "Compile BrighterScript sources using bsc"
+
+                // Look for bsconfig.json in project directory
+                val bsConfig = project.file("bsconfig.json")
+                if (bsConfig.exists()) {
+                    bsConfigFile.set(bsConfig)
+                }
+
+                sourceDir.set(extension.brighterScriptSourceDir)
+                stagingDir.set(extension.brighterScriptStagingDir)
+                bscCommand.set(extension.brighterScriptCommand)
+                workingDir.set(project.layout.projectDirectory)
+            }
+        }
+
+        // Task 2: Merge Kotlin and BrighterScript outputs
+        val mergeTask = project.tasks.register("mergeBrsOutput", MergeBrsOutputTask::class.java).apply {
+            configure {
+                group = "roku"
+                description = "Merge Kotlin and BrighterScript compiled outputs"
+
+                // Depends on both compilations
+                dependsOn(compileBsTask)
+                dependsOn("compileKotlinBrs")
+                dependsOn("compileComponentsKotlinBrs")
+
+                kotlinBrsSource.set(project.layout.buildDirectory.dir("brs/brs/main/source"))
+                kotlinBrsComponents.set(project.layout.buildDirectory.dir("brs/brs/main/components"))
+                brighterScriptStaging.set(extension.brighterScriptStagingDir)
+                mergedOutput.set(project.layout.buildDirectory.dir("merged-staging"))
+            }
+        }
+
+        // Stdlib BRS files provider for merge/package task
+        val stdlibBrsFilesProvider = project.provider {
+            val runtimeJar = brsRuntimeConfig.resolve().firstOrNull()
+            if (runtimeJar != null && runtimeJar.exists()) {
+                project.zipTree(runtimeJar)
+            } else {
+                project.files()
+            }
+        }
+
+        // Configure merge task with stdlib files
+        mergeTask.configure {
+            stdlibBrsFiles.from(stdlibBrsFilesProvider)
+        }
+
+        // Task 3: Reconfigure packageRoku to use merged output when in hybrid mode
+        // We create a new packageHybridRoku task instead of modifying the existing one
+        val packageHybridTask = project.tasks.register("packageHybridRoku", PackageRokuTask::class.java).apply {
+            configure {
+                group = "roku"
+                description = "Package hybrid Roku app (Kotlin + BrighterScript) as .zip"
+
+                dependsOn(mergeTask)
+
+                // Use merged output directories
+                val mergedDir = project.layout.buildDirectory.dir("merged-staging")
+                compiledBrs.set(mergedDir.map { it.dir("source") })
+
+                // Manifest from merged staging (BrighterScript may have processed it)
+                manifest.set(mergedDir.map { it.file("manifest") })
+
+                // Components from merged staging - include ALL component files (XML, BRS, and sourcemaps)
+                components.from(mergeTask.map { task ->
+                    project.fileTree(task.mergedOutput.get().dir("components")) { include("**/*") }
+                })
+                componentsBaseDir.set(mergedDir.map { it.dir("components") })
+
+                // Images from merged staging
+                images.from(mergedDir.map { dir ->
+                    project.fileTree(dir.dir("images"))
+                })
+                imagesBaseDir.set(mergedDir.map { it.dir("images") })
+
+                // Fonts from merged staging
+                fonts.from(mergedDir.map { dir ->
+                    project.fileTree(dir.dir("fonts"))
+                })
+                fontsBaseDir.set(mergedDir.map { it.dir("fonts") })
+
+                // Assets from merged staging (if exists)
+                // Note: We don't set assetsBaseDir for hybrid builds since the
+                // assets may not exist in BrighterScript projects. The assets
+                // files collection handles non-existence gracefully.
+                assets.from(mergedDir.map { dir ->
+                    val assetsDir = dir.dir("assets").asFile
+                    if (assetsDir.exists()) project.fileTree(assetsDir) else project.files()
+                })
+
+                outputZip.set(
+                    extension.appName.flatMap { appName ->
+                        project.layout.buildDirectory.file("roku/$appName.zip")
+                    }
+                )
+
+                // Add other standard Roku directories from merged staging
+                // These include data/, locale/, and any other directories
+                additionalDirsBase = mergedDir.get().asFile
+
+                // data/ directory
+                val dataFiles = project.objects.fileCollection()
+                dataFiles.from(mergedDir.map { dir ->
+                    val dataDir = dir.dir("data").asFile
+                    if (dataDir.exists()) project.fileTree(dataDir) else project.files()
+                })
+                additionalDirs.add(dataFiles to "data")
+
+                // locale/ directory
+                val localeFiles = project.objects.fileCollection()
+                localeFiles.from(mergedDir.map { dir ->
+                    val localeDir = dir.dir("locale").asFile
+                    if (localeDir.exists()) project.fileTree(localeDir) else project.files()
+                })
+                additionalDirs.add(localeFiles to "locale")
+            }
+        }
+
+        // Task 4: Install hybrid app
+        val installHybridTask = project.tasks.register("installHybridRoku", InstallRokuTask::class.java).apply {
+            configure {
+                group = "roku"
+                description = "Install hybrid Roku app to device and launch it"
+
+                dependsOn(packageHybridTask)
+
+                zipFile.set(packageHybridTask.flatMap { it.outputZip })
+                deviceIp.set(extension.deviceIP)
+                devicePassword.set(extension.devicePassword)
+                launchAfterInstall.convention(true)
+            }
+        }
+
+        // Task 5: Convenience task for full hybrid build cycle
+        project.tasks.register("buildHybrid").configure {
+            group = "roku"
+            description = "Full hybrid build: compile both BrighterScript and Kotlin, merge, and package"
+            dependsOn(packageHybridTask)
+        }
+
+        project.logger.lifecycle("[RokuPlugin] Registered hybrid build tasks: compileBrighterScript, mergeBrsOutput, packageHybridRoku, installHybridRoku, buildHybrid")
     }
 
     private fun loadLocalProperties(project: Project): Properties {

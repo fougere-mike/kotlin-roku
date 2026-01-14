@@ -27,6 +27,12 @@ abstract class RokuExtension @Inject constructor(project: Project) {
     abstract val deviceIP: Property<String>
     abstract val devicePassword: Property<String>
 
+    // BrighterScript integration
+    abstract val brighterScriptEnabled: Property<Boolean>
+    abstract val brighterScriptStagingDir: DirectoryProperty
+    abstract val brighterScriptCommand: Property<String>
+    abstract val brighterScriptSourceDir: DirectoryProperty
+
     init {
         appName.convention(project.name)
         appVersion.convention("1.0.0")
@@ -37,5 +43,11 @@ abstract class RokuExtension @Inject constructor(project: Project) {
         componentsDir.convention(project.layout.projectDirectory.dir("components"))
         fontsDir.convention(project.layout.projectDirectory.dir("fonts"))
         assetsDir.convention(project.layout.projectDirectory.dir("assets"))
+
+        // BrighterScript defaults
+        brighterScriptEnabled.convention(false)
+        brighterScriptStagingDir.convention(project.layout.projectDirectory.dir("out"))
+        brighterScriptCommand.convention("npx bsc")
+        brighterScriptSourceDir.convention(project.layout.projectDirectory.dir("src"))
     }
 }

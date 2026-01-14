@@ -47,8 +47,8 @@ abstract class InstallRokuTask : DefaultTask() {
         val action = if (launch) "Installing and launching" else "Installing"
         logger.lifecycle("$action ${file.name} to Roku device at $ip...")
 
-        // First request to get the Digest challenge
-        val challengeResponse = sendRequest(url, file, null, launch)
+        // First, send a lightweight request to get the Digest challenge (without the file)
+        val challengeResponse = getAuthChallenge(url)
 
         if (challengeResponse.code == 401) {
             val authHeader = challengeResponse.wwwAuthenticate
@@ -63,11 +63,16 @@ abstract class InstallRokuTask : DefaultTask() {
                 params = digestParams
             )
 
-            // Second request with Digest auth
+            // Send the actual file with proper auth
+            logger.lifecycle("Uploading ${file.length() / 1024}KB package...")
             val result = sendRequest(url, file, authorizationHeader, launch)
             handleResponse(result, launch)
+        } else if (challengeResponse.code in 200..299) {
+            // Device doesn't require auth, send the file directly
+            val result = sendRequest(url, file, null, launch)
+            handleResponse(result, launch)
         } else {
-            handleResponse(challengeResponse, launch)
+            throw GradleException("Failed to connect to Roku device: HTTP ${challengeResponse.code}")
         }
     }
 
@@ -88,7 +93,7 @@ abstract class InstallRokuTask : DefaultTask() {
             setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
             authHeader?.let { setRequestProperty("Authorization", it) }
             connectTimeout = 30000
-            readTimeout = 60000
+            readTimeout = 120000  // Longer timeout for large files
         }
 
         try {
@@ -122,6 +127,41 @@ abstract class InstallRokuTask : DefaultTask() {
                 } else {
                     connection.errorStream?.bufferedReader()?.readText() ?: ""
                 }
+            } catch (e: Exception) {
+                ""
+            }
+
+            return HttpResponse(responseCode, body, wwwAuth)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    /**
+     * Send a minimal request just to get the auth challenge without uploading the file.
+     */
+    private fun getAuthChallenge(url: String): HttpResponse {
+        val connection = URL(url).openConnection() as HttpURLConnection
+
+        connection.apply {
+            requestMethod = "POST"
+            doOutput = true
+            doInput = true
+            setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+            connectTimeout = 10000
+            readTimeout = 10000
+        }
+
+        try {
+            // Send minimal form data just to trigger auth challenge
+            DataOutputStream(connection.outputStream).use { out ->
+                out.writeBytes("mysubmit=Install")
+            }
+
+            val responseCode = connection.responseCode
+            val wwwAuth = connection.getHeaderField("WWW-Authenticate")
+            val body = try {
+                connection.errorStream?.bufferedReader()?.readText() ?: ""
             } catch (e: Exception) {
                 ""
             }

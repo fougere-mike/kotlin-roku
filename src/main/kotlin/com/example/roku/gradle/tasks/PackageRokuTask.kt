@@ -71,6 +71,19 @@ abstract class PackageRokuTask : DefaultTask() {
     @get:Optional
     abstract val stdlibBrs: ConfigurableFileCollection
 
+    /**
+     * Additional directories to include (data/, locale/, etc.)
+     * Each pair is (ConfigurableFileCollection, prefix)
+     */
+    @get:Internal
+    val additionalDirs: MutableList<Pair<ConfigurableFileCollection, String>> = mutableListOf()
+
+    /**
+     * Base directory for additional dirs to compute relative paths
+     */
+    @get:Internal
+    var additionalDirsBase: java.io.File? = null
+
     @get:OutputFile
     abstract val outputZip: RegularFileProperty
 
@@ -151,6 +164,19 @@ abstract class PackageRokuTask : DefaultTask() {
 
             // Add assets/ with directory structure
             addDirectoryToZip(zip, assets, assetsBaseDir, "assets")
+
+            // Add any additional directories (data/, locale/, etc.)
+            additionalDirs.forEach { (files, prefix) ->
+                val base = additionalDirsBase
+                files.files.filter { it.exists() && it.isFile }.forEach { file ->
+                    val relativePath = if (base != null && file.startsWith(base)) {
+                        file.relativeTo(base).path
+                    } else {
+                        "$prefix/${file.name}"
+                    }
+                    addToZip(zip, file, relativePath)
+                }
+            }
         }
 
         logger.lifecycle("Created Roku package: ${zipFile.absolutePath}")
