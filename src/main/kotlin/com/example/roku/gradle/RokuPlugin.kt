@@ -4,6 +4,7 @@ import com.example.roku.gradle.tasks.CompileBrighterScriptTask
 import com.example.roku.gradle.tasks.CopyKotlinToBsTask
 import com.example.roku.gradle.tasks.DeleteRokuTask
 import com.example.roku.gradle.tasks.DeviceLogTask
+import com.example.roku.gradle.tasks.GenerateLayoutStubsTask
 import com.example.roku.gradle.tasks.InstallRokuTask
 import com.example.roku.gradle.tasks.MergeBrsOutputTask
 import com.example.roku.gradle.tasks.PackageRokuTask
@@ -171,6 +172,35 @@ class RokuPlugin : Plugin<Project> {
             } else {
                 project.files()
             }
+        }
+
+        // Generate Layout stubs for IDE support
+        // This task parses @SGLayout annotations and generates stub .kt files
+        // that provide code completion without relying on the FIR plugin.
+        //
+        // IMPORTANT: We use extension.componentsDir directly as input (not the brsComponents source set)
+        // to avoid circular dependencies. The stubs are added to brsMain, not brsComponents.
+        val generateLayoutStubsTask = project.tasks.register("generateLayoutStubs", GenerateLayoutStubsTask::class.java).apply {
+            configure {
+                // Use the components directory directly to avoid circular dependency
+                // (brsComponents source set includes the stub output dir)
+                sourceFiles.from(extension.componentsDir)
+                stubOutputDir.set(project.layout.buildDirectory.dir("generated/layout-stubs"))
+            }
+        }
+
+        // Make components compile task depend on stub generation
+        // The stubs must exist before brsComponents compilation because user code
+        // references MainScreen_Layout(top) which comes from the stubs.
+        project.tasks.named("compileComponentsKotlinBrs") { dependsOn(generateLayoutStubsTask) }
+
+        // Add generated stubs to brsComponents source set so the compiler can resolve symbols.
+        // Note: We use afterEvaluate and srcDir (not from()) to add to the source set configuration
+        // without creating a task dependency cycle.
+        project.afterEvaluate {
+            val kotlinExt = project.extensions.getByType(KotlinMultiplatformExtension::class.java)
+            val brsComponentsSourceSet = kotlinExt.sourceSets.findByName("brsComponents")
+            brsComponentsSourceSet?.kotlin?.srcDir(project.layout.buildDirectory.dir("generated/layout-stubs"))
         }
 
         // Compiled components directory
