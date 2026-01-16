@@ -163,7 +163,19 @@ abstract class PackageRokuTask : DefaultTask() {
                         .forEach { brsFile ->
                             // Strip "Kt" suffix to match component name (e.g., "ShelfViewKt" -> "ShelfView")
                             val baseName = brsFile.nameWithoutExtension.removeSuffix("Kt")
-                            val targetDir = xmlDirMap[baseName] ?: ""
+
+                            // Check for exact component match OR layout file for a component
+                            val componentName = when {
+                                xmlDirMap.containsKey(baseName) -> baseName
+                                baseName.endsWith("_Layout") -> {
+                                    // Check if this is a layout file for a known component
+                                    val possibleComponent = baseName.removeSuffix("_Layout")
+                                    if (xmlDirMap.containsKey(possibleComponent)) possibleComponent else null
+                                }
+                                else -> null
+                            }
+
+                            val targetDir = componentName?.let { xmlDirMap[it] } ?: ""
                             val targetPath = if (targetDir.isEmpty()) {
                                 "components/${brsFile.name}"
                             } else {
