@@ -190,6 +190,10 @@ abstract class InstallRokuTask : DefaultTask() {
                            it.text.contains("Application Received", ignoreCase = true) } -> {
                 val suffix = if (launched) " and launched" else ""
                 logger.lifecycle("Successfully installed$suffix to Roku device")
+                if (launched) {
+                    // Use ECP to ensure app launches even if Roku thinks package is unchanged
+                    launchAppViaEcp(deviceIp.get())
+                }
             }
             response.code in 200..299 || successes.isNotEmpty() -> {
                 successes.forEach { logger.lifecycle(it.text) }
@@ -280,5 +284,27 @@ abstract class InstallRokuTask : DefaultTask() {
         val md = MessageDigest.getInstance("MD5")
         val digest = md.digest(input.toByteArray())
         return digest.joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * Launch the dev channel using Roku's External Control Protocol (ECP).
+     * This ensures the app launches even if the Roku device thinks the package is unchanged.
+     */
+    private fun launchAppViaEcp(ip: String) {
+        try {
+            val connection = URL("http://$ip:8060/launch/dev").openConnection() as HttpURLConnection
+            connection.requestMethod = "POST"
+            connection.connectTimeout = 5000
+            connection.readTimeout = 5000
+            val responseCode = connection.responseCode
+            if (responseCode in 200..299) {
+                logger.lifecycle("App launched via ECP")
+            } else {
+                logger.warn("ECP launch returned: $responseCode")
+            }
+            connection.disconnect()
+        } catch (e: Exception) {
+            logger.warn("Failed to launch via ECP: ${e.message}")
+        }
     }
 }

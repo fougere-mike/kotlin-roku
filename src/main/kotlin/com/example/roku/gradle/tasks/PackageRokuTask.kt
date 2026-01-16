@@ -5,6 +5,7 @@ import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.tasks.*
+import java.io.File
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -116,26 +117,52 @@ abstract class PackageRokuTask : DefaultTask() {
             addDirectoryToZip(zip, components, componentsBaseDir, "components")
 
             // Add compiled component .brs files - place alongside their XML files
-            if (compiledComponents.isPresent && processedXmlDir.isPresent) {
+            if (compiledComponents.isPresent) {
                 val componentsDir = compiledComponents.get().asFile
-                val xmlDir = processedXmlDir.get().asFile
 
                 // Build map: baseName -> relative XML directory path
+                // Include both processed user XMLs and compiler-generated XMLs
                 val xmlDirMap = mutableMapOf<String, String>()
-                xmlDir.walkTopDown()
-                    .filter { it.isFile && it.extension == "xml" }
-                    .forEach { xmlFile ->
-                        val baseName = xmlFile.nameWithoutExtension
-                        val relativeDir = xmlFile.parentFile.relativeTo(xmlDir).path
-                        xmlDirMap[baseName] = relativeDir
-                    }
+
+                // Add processed user XMLs (from processedXmlDir)
+                if (processedXmlDir.isPresent) {
+                    val xmlDir = processedXmlDir.get().asFile
+                    xmlDir.walkTopDown()
+                        .filter { it.isFile && it.extension == "xml" }
+                        .forEach { xmlFile ->
+                            val baseName = xmlFile.nameWithoutExtension
+                            val relativeDir = xmlFile.parentFile.relativeTo(xmlDir).path
+                            xmlDirMap[baseName] = relativeDir
+                        }
+                }
+
+                // Add compiler-generated XMLs (from components/components/ subdirectory)
+                // These are for @Component classes that don't have user-authored XML files
+                val compilerXmlDir = File(componentsDir, "components")
+                if (compilerXmlDir.exists()) {
+                    compilerXmlDir.walkTopDown()
+                        .filter { it.isFile && it.extension == "xml" }
+                        .toList()
+                        .forEach { xmlFile ->
+                            val baseName = xmlFile.nameWithoutExtension
+                            val relativeDir = xmlFile.parentFile.relativeTo(compilerXmlDir).path
+                            // Don't override user XMLs - they take precedence
+                            if (!xmlDirMap.containsKey(baseName)) {
+                                xmlDirMap[baseName] = relativeDir
+                                // Also add compiler-generated XML to package (user XMLs already added above)
+                                val targetPath = "components/$relativeDir/${xmlFile.name}"
+                                addToZip(zip, xmlFile, targetPath)
+                            }
+                        }
+                }
 
                 // Package each BRS file alongside its XML
                 if (componentsDir.exists()) {
                     componentsDir.walkTopDown()
                         .filter { it.isFile && it.extension == "brs" }
                         .forEach { brsFile ->
-                            val baseName = brsFile.nameWithoutExtension
+                            // Strip "Kt" suffix to match component name (e.g., "ShelfViewKt" -> "ShelfView")
+                            val baseName = brsFile.nameWithoutExtension.removeSuffix("Kt")
                             val targetDir = xmlDirMap[baseName] ?: ""
                             val targetPath = if (targetDir.isEmpty()) {
                                 "components/${brsFile.name}"
@@ -145,7 +172,7 @@ abstract class PackageRokuTask : DefaultTask() {
                             addToZip(zip, brsFile, targetPath)
                         }
                 }
-            } else if (compiledComponents.isPresent) {
+            } else if (false) { // Legacy fallback - no longer needed
                 // Fallback: use original behavior if no XML dir provided
                 val componentsDir = compiledComponents.get().asFile
                 if (componentsDir.exists()) {
