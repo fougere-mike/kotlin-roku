@@ -4,8 +4,8 @@ plugins {
     `maven-publish`
 }
 
-group = "com.example"
-version = "1.0.0-SNAPSHOT"
+group = "com.nuvyyo.brightscript"
+version = "2.2.20-brs.1"
 
 repositories {
     mavenLocal()
@@ -13,19 +13,19 @@ repositories {
 }
 
 dependencies {
-    implementation("org.jetbrains.kotlin:kotlin-gradle-plugin:2.2.255-SNAPSHOT")
-    implementation("org.jetbrains.kotlin:kotlin-gradle-plugin-api:2.2.255-SNAPSHOT")
+    implementation("com.nuvyyo:kotlin-gradle-plugin-brs:2.2.20-brs.1")
+    implementation("com.nuvyyo:kotlin-gradle-plugin-api-brs:2.2.20-brs.1")
     // IDE integration APIs for source set indexing
-    implementation("org.jetbrains.kotlin:kotlin-gradle-plugin-idea:2.2.255-SNAPSHOT")
-    implementation("org.jetbrains.kotlin:kotlin-tooling-core:2.2.255-SNAPSHOT")
+    implementation("com.nuvyyo:kotlin-gradle-plugin-idea-brs:2.2.20-brs.1")
+    implementation("com.nuvyyo:kotlin-tooling-core-brs:2.2.20-brs.1")
 }
 
 gradlePlugin {
     plugins {
         create("kotlinRoku") {
-            id = "com.example.kotlin-roku"
+            id = "com.nuvyyo.brightscript.kotlin-roku"
             implementationClass = "com.example.roku.gradle.RokuPlugin"
-            displayName = "Kotlin Roku Plugin"
+            displayName = "BrightScript Kotlin Plugin"
             description = "Compile Kotlin to BrightScript and package Roku apps"
         }
     }
