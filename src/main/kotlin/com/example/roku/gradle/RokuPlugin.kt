@@ -84,6 +84,14 @@ class RokuPlugin : Plugin<Project> {
             "com.nuvyyo:kotlin-compiler-brs:$kotlinVersion"
         )
 
+        // Override kotlinCompilerClasspath to use the BRS compiler instead of the non-existent
+        // org.jetbrains.kotlin:kotlin-compiler-embeddable:2.2.20-brs.1 that KGP would add by default.
+        // Adding our dep directly pre-empts the defaultDependencies registered by KGP.
+        project.dependencies.add(
+            "kotlinCompilerClasspath",
+            "com.nuvyyo:kotlin-compiler-brs:$kotlinVersion"
+        )
+
         // Create a configuration for the BRS stdlib (compile-time klib)
         val brsStdlibConfig = project.configurations.create("kotlinBrsStdlib") {
             isCanBeConsumed = false
