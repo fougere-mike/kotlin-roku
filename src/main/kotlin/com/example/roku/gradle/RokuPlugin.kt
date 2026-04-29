@@ -78,10 +78,10 @@ class RokuPlugin : Plugin<Project> {
         }
 
         // Add the BRS compiler dependency
-        val kotlinVersion = project.findProperty("kotlin.version") ?: "2.2.255-SNAPSHOT"
+        val kotlinVersion = project.findProperty("kotlin.version") ?: "2.2.20-brs.1"
         project.dependencies.add(
             "brsCompiler",
-            "org.jetbrains.kotlin:kotlin-compiler-brs:$kotlinVersion"
+            "com.nuvyyo:kotlin-compiler-brs:$kotlinVersion"
         )
 
         // Create a configuration for the BRS stdlib (compile-time klib)
@@ -93,7 +93,7 @@ class RokuPlugin : Plugin<Project> {
         // Add the BRS stdlib dependency
         project.dependencies.add(
             "kotlinBrsStdlib",
-            "org.jetbrains.kotlin:kotlin-stdlib-brs:$kotlinVersion"
+            "com.nuvyyo:kotlin-stdlib-brs:$kotlinVersion"
         )
 
         // Register IDE import for BRS source sets
@@ -109,7 +109,7 @@ class RokuPlugin : Plugin<Project> {
         // Add the BRS stdlib runtime JAR dependency (contains .brs files)
         project.dependencies.add(
             "kotlinBrsRuntime",
-            "org.jetbrains.kotlin:kotlin-stdlib-brs:$kotlinVersion:brs-runtime"
+            "com.nuvyyo:kotlin-stdlib-brs-runtime:$kotlinVersion"
         )
 
         // Configure all BRS compile tasks with the compiler JAR and stdlib
@@ -775,7 +775,7 @@ internal class BrsStdlibIdeDependencyResolver(
      */
     private fun brsStdlibCoordinates(): IdeaKotlinBinaryCoordinates {
         return IdeaKotlinBinaryCoordinates(
-            group = "org.jetbrains.kotlin",
+            group = "com.nuvyyo",
             module = "kotlin-stdlib-brs",
             version = kotlinVersion
         )
