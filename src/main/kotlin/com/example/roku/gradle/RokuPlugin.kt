@@ -71,8 +71,7 @@ class RokuPlugin : Plugin<Project> {
         // canonical KMP associateWith mechanism. dependsOn into the main compilation's default
         // source set triggers KotlinSourceSetDependsOnDefaultCompilationSourceSet and
         // KotlinDefaultHierarchyFallbackDependsOnUsageDetected warnings.
-        val brsMainCompilation = brsTarget.compilations.getByName("main")
-        componentsCompilation.associateWith(brsMainCompilation)
+        componentsCompilation.associateWith(brsTarget.compilations.getByName("main"))
 
         // Create a configuration to resolve the BRS compiler JAR
         val brsCompilerConfig = project.configurations.create("brsCompiler") {
