@@ -67,9 +67,12 @@ class RokuPlugin : Plugin<Project> {
         val brsComponentsSourceSet = componentsCompilation.defaultSourceSet
         brsComponentsSourceSet.kotlin.srcDir(rokuExtension.componentsDir)
 
-        // Make brsComponents depend on brsMain for symbol visibility
-        val brsMainSourceSet = kotlinExt.sourceSets.getByName("brsMain")
-        brsComponentsSourceSet.dependsOn(brsMainSourceSet)
+        // Share symbols (including internal) between brsComponents and brsMain via the
+        // canonical KMP associateWith mechanism. dependsOn into the main compilation's default
+        // source set triggers KotlinSourceSetDependsOnDefaultCompilationSourceSet and
+        // KotlinDefaultHierarchyFallbackDependsOnUsageDetected warnings.
+        val brsMainCompilation = brsTarget.compilations.getByName("main")
+        componentsCompilation.associateWith(brsMainCompilation)
 
         // Create a configuration to resolve the BRS compiler JAR
         val brsCompilerConfig = project.configurations.create("brsCompiler") {
