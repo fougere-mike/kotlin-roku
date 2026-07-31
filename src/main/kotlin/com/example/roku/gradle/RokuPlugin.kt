@@ -10,6 +10,7 @@ import com.example.roku.gradle.tasks.MergeBrsOutputTask
 import com.example.roku.gradle.tasks.PackageRokuTask
 import com.example.roku.gradle.tasks.ProcessComponentXmlTask
 import com.example.roku.gradle.tasks.RunRokuTestsTask
+import com.example.roku.gradle.tasks.StageRokuTestSourceTask
 import org.gradle.api.Plugin
 import org.gradle.api.Project
 import org.gradle.api.artifacts.Configuration
@@ -122,6 +123,28 @@ class RokuPlugin : Plugin<Project> {
             "com.nuvyyo:kotlin-stdlib-brs-runtime:$kotlinVersion"
         )
 
+        // Create a configuration for the kotlin.test runtime files (.brs files for the TEST package).
+        // Resolution is deferred until packageRokuTests actually runs, so the plugin applies and
+        // configures cleanly even when the artifact is not yet in any repository.
+        val brsTestRuntimeConfig = project.configurations.create("kotlinBrsTestRuntime") {
+            isCanBeConsumed = false
+            isCanBeResolved = true
+        }
+
+        // Add the kotlin.test runtime JAR dependency (contains .brs files)
+        project.dependencies.add(
+            "kotlinBrsTestRuntime",
+            "com.nuvyyo:kotlin-test-brs-runtime:$kotlinVersion"
+        )
+
+        // Auto-add the kotlin.test klib to the brsTest source set so test sources compile
+        // without users declaring the dependency themselves.
+        kotlinExt.sourceSets.matching { it.name == "brsTest" }.all {
+            dependencies {
+                implementation("com.nuvyyo:kotlin-test-brs:$kotlinVersion")
+            }
+        }
+
         // Configure all BRS compile tasks with the compiler JAR and stdlib
         project.tasks.withType(KotlinBrsCompile::class.java).configureEach {
             compilerJar.fileProvider(project.provider { brsCompilerConfig.singleFile })
@@ -136,10 +159,16 @@ class RokuPlugin : Plugin<Project> {
                 // Output to same location as before for packaging compatibility
                 outputDirectory.set(project.layout.buildDirectory.dir("brs/brs/main/components"))
             }
+
+            // Test compilation mirrors the components wiring: it references main classes
+            if (name == "compileTestKotlinBrs") {
+                dependsOn("compileKotlinBrs")
+                libraries.from(project.layout.buildDirectory.dir("brs/brs/main/source"))
+            }
         }
 
         // Register tasks
-        registerTasks(project, rokuExtension, rokuTestExtension, brsRuntimeConfig, brsCompilerConfig, brsStdlibConfig)
+        registerTasks(project, rokuExtension, rokuTestExtension, brsRuntimeConfig, brsTestRuntimeConfig, brsCompilerConfig, brsStdlibConfig)
 
         // Register hybrid build tasks if BrighterScript is enabled
         project.afterEvaluate {
@@ -154,6 +183,7 @@ class RokuPlugin : Plugin<Project> {
         extension: RokuExtension,
         testExtension: RokuTestExtension,
         brsRuntimeConfig: org.gradle.api.artifacts.Configuration,
+        brsTestRuntimeConfig: org.gradle.api.artifacts.Configuration,
         brsCompilerConfig: org.gradle.api.artifacts.Configuration,
         brsStdlibConfig: org.gradle.api.artifacts.Configuration
     ) {
@@ -177,6 +207,24 @@ class RokuPlugin : Plugin<Project> {
         // Stdlib BRS files provider (used by multiple tasks)
         val stdlibBrsFilesProvider = project.provider {
             val runtimeJar = brsRuntimeConfig.resolve().firstOrNull()
+            if (runtimeJar != null && runtimeJar.exists()) {
+                project.zipTree(runtimeJar)
+            } else {
+                project.files()
+            }
+        }
+
+        // kotlin.test BRS runtime files provider (TEST package only). Gradle evaluates task
+        // input providers at task-graph time, so a strict resolve here would fail the whole
+        // build before stageRokuTestSource can report missing test sources - and before the
+        // artifact is even needed. Swallow the failure here; packageRokuTests re-resolves
+        // strictly in doFirst (below) so a genuinely missing runtime still fails loudly.
+        val testRuntimeBrsFilesProvider = project.provider {
+            val runtimeJar = try {
+                brsTestRuntimeConfig.resolve().firstOrNull()
+            } catch (e: Exception) {
+                null
+            }
             if (runtimeJar != null && runtimeJar.exists()) {
                 project.zipTree(runtimeJar)
             } else {
@@ -317,30 +365,35 @@ class RokuPlugin : Plugin<Project> {
 
         // ==================== Test Tasks ====================
 
+        // Stage test sources: compiled test sources plus main classes (minus the app entry
+        // point). Fails loudly when no test sources were compiled - the old behavior silently
+        // packaged the MAIN app as the "test app", producing runs that never ran a test.
+        val stageTestSourceTask = project.tasks.register("stageRokuTestSource", StageRokuTestSourceTask::class.java).apply {
+            configure {
+                group = "roku test"
+                description = "Stage compiled test + main BRS sources for the Roku test package"
+
+                // compileTestKotlinBrs always exists: the BRS target is created with createTestCompilation=true
+                dependsOn("compileTestKotlinBrs")
+                dependsOn("compileKotlinBrs")
+
+                testSourceDir.set(project.layout.buildDirectory.dir("brs/brs/test/source"))
+                mainSourceDir.set(project.layout.buildDirectory.dir("brs/brs/main/source"))
+                outputDir.set(project.layout.buildDirectory.dir("roku/testSource"))
+            }
+        }
+
         // Package tests task: creates Roku test app .zip
         val packageTestsTask = project.tasks.register("packageRokuTests", PackageRokuTask::class.java).apply {
             configure {
                 group = "roku test"
                 description = "Package Roku test app as .zip"
 
-                // Depend on the test compile task if it exists, plus component compile and XML processing
-                project.tasks.findByName("compileTestKotlinBrs")?.let {
-                    dependsOn(it)
-                } ?: dependsOn("compileKotlinBrs")
+                dependsOn(stageTestSourceTask)
                 dependsOn("compileComponentsKotlinBrs")
                 dependsOn(processComponentXmlTask)
 
-                // Use test source output if available, otherwise main
-                val testSourceDir = project.layout.buildDirectory.dir("brs/brs/test/source")
-                val mainSourceDir = project.layout.buildDirectory.dir("brs/brs/main/source")
-                compiledBrs.set(project.provider {
-                    val testDir = testSourceDir.get().asFile
-                    if (testDir.exists() && testDir.listFiles()?.isNotEmpty() == true) {
-                        testSourceDir.get()
-                    } else {
-                        mainSourceDir.get()
-                    }
-                })
+                compiledBrs.set(stageTestSourceTask.flatMap { it.outputDir })
 
                 manifest.set(extension.manifestFile)
 
@@ -372,8 +425,25 @@ class RokuPlugin : Plugin<Project> {
                     }
                 )
 
-                // Include stdlib .brs runtime files from the resolved JAR
+                // Include stdlib .brs runtime files plus the kotlin.test runtime (TEST package only)
                 stdlibBrs.from(stdlibBrsFilesProvider)
+                stdlibBrs.from(testRuntimeBrsFilesProvider)
+
+                // The lazy provider above swallows resolution failures (see its comment).
+                // Enforce the runtime's presence here: packaging tests without the kotlin.test
+                // .brs files would deploy an app that hard-fails to load on device.
+                doFirst {
+                    try {
+                        brsTestRuntimeConfig.resolve()
+                    } catch (e: Exception) {
+                        throw org.gradle.api.GradleException(
+                            "packageRokuTests requires com.nuvyyo:kotlin-test-brs-runtime (the kotlin.test " +
+                                "BrightScript runtime) but it could not be resolved. Publish it to Maven Local " +
+                                "(run ./rebuild.sh in the Kotlin repo) and retry.",
+                            e
+                        )
+                    }
+                }
             }
         }
 

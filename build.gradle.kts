@@ -37,6 +37,8 @@ dependencies {
     // IDE integration APIs for source set indexing
     implementation("com.nuvyyo:kotlin-gradle-plugin-idea-brs:2.2.20-brs.1")
     implementation("com.nuvyyo:kotlin-tooling-core-brs:2.2.20-brs.1")
+
+    testImplementation("junit:junit:4.13.2")
 }
 
 gradlePlugin {
