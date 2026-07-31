@@ -14,7 +14,11 @@ import java.net.SocketTimeoutException
  * Gradle task that runs Kotlin tests on a Roku device and parses the JSON results.
  *
  * Connects to the Roku debug console (port 8085) and captures test output between
- * [KOTLINTEST_START] and [KOTLINTEST_END] markers.
+ * [KOTLINTEST_START] and [KOTLINTEST_END] markers. The console buffer replays stale
+ * output from previous runs, so all markers are ignored until a fresh
+ * ===KOTLINTEST_SENTINEL_<ts>=== line proves the stream belongs to THIS run
+ * (see [RokuTestStreamParser]). Crashes (BrightScript Micro Debugger, premature app
+ * exit) fail the task with a backtrace instead of hanging until timeout.
  *
  * Output:
  * - JSON results file
@@ -62,8 +66,17 @@ abstract class RunRokuTestsTask : DefaultTask() {
         logger.lifecycle("")
 
         val results = mutableListOf<TestEvent>()
-        var inTestOutput = false
+        val parser = RokuTestStreamParser(
+            taskStartMillis = System.currentTimeMillis(),
+            log = { logger.lifecycle(it) },
+        )
+        parser.onEvent = { event ->
+            results.add(event)
+            logTestEvent(event)
+        }
+
         var testCompleted = false
+        var crash: RokuTestStreamParser.Outcome.Crashed? = null
         val startTime = System.currentTimeMillis()
 
         try {
@@ -71,45 +84,52 @@ abstract class RunRokuTestsTask : DefaultTask() {
                 socket.soTimeout = timeoutMs.toInt()
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
 
-                while (!testCompleted) {
-                    val line = reader.readLine() ?: break
+                while (!testCompleted && crash == null) {
+                    val line = reader.readLine()
+                    if (line == null) {
+                        // Stream closed: a pending exit-grace/crash-capture is a crash verdict.
+                        val outcome = parser.onStreamEnd(System.currentTimeMillis())
+                        if (outcome is RokuTestStreamParser.Outcome.Crashed) crash = outcome
+                        break
+                    }
 
                     // Check for timeout
                     if (System.currentTimeMillis() - startTime > timeoutMs) {
                         throw GradleException("Test execution timed out after ${timeoutMs / 1000} seconds")
                     }
 
-                    when {
-                        line.contains("[KOTLINTEST_START]") -> {
-                            inTestOutput = true
-                            logger.lifecycle("Test run started")
-                            logger.lifecycle("─".repeat(60))
-                        }
-                        line.contains("[KOTLINTEST_END]") -> {
-                            inTestOutput = false
-                            testCompleted = true
-                            logger.lifecycle("─".repeat(60))
-                            logger.lifecycle("Test run completed")
-                        }
-                        inTestOutput && line.trim().startsWith("{") -> {
-                            val event = parseTestEvent(line.trim())
-                            if (event != null) {
-                                results.add(event)
-                                logTestEvent(event)
-                            }
-                        }
+                    when (val outcome = parser.onLine(line, System.currentTimeMillis())) {
+                        is RokuTestStreamParser.Outcome.Completed -> testCompleted = true
+                        is RokuTestStreamParser.Outcome.Crashed -> crash = outcome
+                        is RokuTestStreamParser.Outcome.InProgress -> Unit
                     }
                 }
             }
         } catch (e: SocketTimeoutException) {
-            throw GradleException("Connection to Roku device timed out. Device may be unresponsive.")
+            val outcome = parser.onStreamEnd(System.currentTimeMillis())
+            if (outcome is RokuTestStreamParser.Outcome.Crashed) {
+                crash = outcome
+            } else {
+                throw GradleException("Connection to Roku device timed out. Device may be unresponsive.")
+            }
+        } catch (e: GradleException) {
+            throw e
         } catch (e: Exception) {
             throw GradleException("Failed to connect to Roku device: ${e.message}")
         }
 
-        // Write results
+        // Write results (even on crash - partial results help diagnosis)
         writeJsonResults(results)
         writeJUnitXml(results)
+
+        crash?.let { throw GradleException(buildCrashMessage(it)) }
+
+        if (!testCompleted) {
+            throw GradleException(
+                "Test run did not complete: no fresh [KOTLINTEST_END] marker received before the stream ended. " +
+                    "The app may have crashed before startRun() or the build deployed a stale package."
+            )
+        }
 
         // Report summary
         val summary = calculateSummary(results)
@@ -128,6 +148,20 @@ abstract class RunRokuTestsTask : DefaultTask() {
         if (summary.failed == 0) {
             logger.lifecycle("")
             logger.lifecycle("All ${summary.passed} test(s) passed!")
+        }
+    }
+
+    private fun buildCrashMessage(crash: RokuTestStreamParser.Outcome.Crashed): String {
+        return buildString {
+            appendLine("APP CRASHED DURING TESTS")
+            appendLine("Reason: ${crash.reason}")
+            crash.lastTestStarted?.let { appendLine("Crash occurred during: $it") }
+            if (crash.details.isNotEmpty()) {
+                appendLine("Crash details:")
+                appendLine("─".repeat(60))
+                crash.details.forEach { appendLine(it) }
+                append("─".repeat(60))
+            }
         }
     }
 
@@ -156,48 +190,6 @@ abstract class RunRokuTestsTask : DefaultTask() {
                 // Handled by summary logging
             }
         }
-    }
-
-    private fun parseTestEvent(json: String): TestEvent? {
-        return try {
-            // Simple JSON parsing without external dependencies
-            val type = extractJsonString(json, "type") ?: return null
-            TestEvent(
-                type = type,
-                suite = extractJsonString(json, "suite") ?: "",
-                test = extractJsonString(json, "test") ?: "",
-                message = extractJsonString(json, "message") ?: "",
-                error = extractJsonString(json, "error") ?: "",
-                expected = extractJsonString(json, "expected") ?: "",
-                actual = extractJsonString(json, "actual") ?: "",
-                reason = extractJsonString(json, "reason") ?: "",
-                durationMs = extractJsonInt(json, "duration_ms") ?: 0,
-                timestamp = extractJsonLong(json, "timestamp") ?: 0L,
-                passed = extractJsonInt(json, "passed") ?: 0,
-                failed = extractJsonInt(json, "failed") ?: 0,
-                ignored = extractJsonInt(json, "ignored") ?: 0,
-                totalTests = extractJsonInt(json, "total_tests") ?: 0,
-                totalSuites = extractJsonInt(json, "total_suites") ?: 0
-            )
-        } catch (e: Exception) {
-            logger.debug("Failed to parse test event: $json - ${e.message}")
-            null
-        }
-    }
-
-    private fun extractJsonString(json: String, key: String): String? {
-        val pattern = """"$key"\s*:\s*"([^"]*)"""".toRegex()
-        return pattern.find(json)?.groupValues?.get(1)
-    }
-
-    private fun extractJsonInt(json: String, key: String): Int? {
-        val pattern = """"$key"\s*:\s*(\d+)""".toRegex()
-        return pattern.find(json)?.groupValues?.get(1)?.toIntOrNull()
-    }
-
-    private fun extractJsonLong(json: String, key: String): Long? {
-        val pattern = """"$key"\s*:\s*(\d+)""".toRegex()
-        return pattern.find(json)?.groupValues?.get(1)?.toLongOrNull()
     }
 
     private fun writeJsonResults(results: List<TestEvent>) {
@@ -308,52 +300,6 @@ abstract class RunRokuTestsTask : DefaultTask() {
         }
 
         return TestSummary(passed, failed, ignored, passed + failed + ignored, durationMs)
-    }
-
-    data class TestEvent(
-        val type: String,
-        val suite: String = "",
-        val test: String = "",
-        val message: String = "",
-        val error: String = "",
-        val expected: String = "",
-        val actual: String = "",
-        val reason: String = "",
-        val durationMs: Int = 0,
-        val timestamp: Long = 0L,
-        val passed: Int = 0,
-        val failed: Int = 0,
-        val ignored: Int = 0,
-        val totalTests: Int = 0,
-        val totalSuites: Int = 0
-    ) {
-        fun toJson(): String {
-            val parts = mutableListOf<String>()
-            parts.add(""""type":"$type"""")
-            if (suite.isNotEmpty()) parts.add(""""suite":"$suite"""")
-            if (test.isNotEmpty()) parts.add(""""test":"$test"""")
-            if (message.isNotEmpty()) parts.add(""""message":"${escapeJsonString(message)}"""")
-            if (error.isNotEmpty()) parts.add(""""error":"$error"""")
-            if (expected.isNotEmpty()) parts.add(""""expected":"${escapeJsonString(expected)}"""")
-            if (actual.isNotEmpty()) parts.add(""""actual":"${escapeJsonString(actual)}"""")
-            if (reason.isNotEmpty()) parts.add(""""reason":"$reason"""")
-            if (durationMs > 0) parts.add(""""duration_ms":$durationMs""")
-            if (timestamp > 0) parts.add(""""timestamp":$timestamp""")
-            if (passed > 0) parts.add(""""passed":$passed""")
-            if (failed > 0) parts.add(""""failed":$failed""")
-            if (ignored > 0) parts.add(""""ignored":$ignored""")
-            if (totalTests > 0) parts.add(""""total_tests":$totalTests""")
-            if (totalSuites > 0) parts.add(""""total_suites":$totalSuites""")
-            return "{${parts.joinToString(",")}}"
-        }
-
-        private fun escapeJsonString(s: String): String {
-            return s.replace("\\", "\\\\")
-                .replace("\"", "\\\"")
-                .replace("\n", "\\n")
-                .replace("\r", "\\r")
-                .replace("\t", "\\t")
-        }
     }
 
     data class TestSummary(
