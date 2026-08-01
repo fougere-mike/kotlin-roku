@@ -99,11 +99,15 @@ internal class RokuTestStreamParser(
     private val crashLines = mutableListOf<String>()
 
     fun onLine(line: String, nowMs: Long): Outcome {
+        // A fresh sentinel in ANY active state starts (or restarts) the trusted window - the
+        // streaming equivalent of the shell runner taking the LAST sentinel (run-tests.sh:466).
+        // Back-to-back runs <120s apart replay the previous run's still-fresh sentinel from the
+        // console buffer; arming only once would consume that replayed run's markers as current.
+        if (phase != Phase.DONE && handleSentinel(line)) {
+            return Outcome.InProgress
+        }
         return when (phase) {
-            Phase.AWAITING_SENTINEL -> {
-                tryArm(line)
-                Outcome.InProgress
-            }
+            Phase.AWAITING_SENTINEL -> Outcome.InProgress
             Phase.ARMED -> onArmedLine(line, nowMs)
             Phase.EXIT_GRACE -> onExitGraceLine(line, nowMs)
             Phase.CAPTURING_CRASH -> onCrashCaptureLine(line, nowMs)
@@ -129,23 +133,39 @@ internal class RokuTestStreamParser(
         }
     }
 
-    private fun tryArm(line: String) {
-        val match = SENTINEL_REGEX.find(line) ?: return
+    /**
+     * Returns true when the line is a FRESH sentinel, after (re)arming on it. A fresh sentinel
+     * seen while already armed means a newer run started (or the adapter's own second print
+     * after the buffer flood, where the reset is a harmless no-op): everything collected so far
+     * was replayed from the console buffer and must be discarded.
+     */
+    private fun handleSentinel(line: String): Boolean {
+        val match = SENTINEL_REGEX.find(line) ?: return false
         val sentinelMs = match.groupValues[1].toDoubleOrNull()
             ?.takeIf { it.isFinite() }
             ?.toLong()
         if (sentinelMs == null) {
             log("Ignoring sentinel with unparseable timestamp: ${match.value}")
-            return
+            return false
         }
         // Signed diff, mirroring run-tests.sh: only sentinels OLDER than the window are stale.
         val ageMs = taskStartMillis - sentinelMs
         if (ageMs > sentinelFreshnessMs) {
             log("Ignoring stale sentinel from a previous run (${ageMs / 1000}s before task start): ${match.value}")
-            return
+            return false
         }
+        if (phase != Phase.AWAITING_SENTINEL && events.isNotEmpty()) {
+            log("Newer fresh sentinel found - discarding ${events.size} replayed event(s) from a previous run")
+        }
+        events.clear()
+        inTestOutput = false
+        exitLine = null
+        exitDeadlineMs = 0L
+        crashLines.clear()
+        crashDeadlineMs = 0L
         phase = Phase.ARMED
         log("Fresh sentinel found (${ageMs / 1000}s before task start) - now trusting test markers")
+        return true
     }
 
     private fun onArmedLine(line: String, nowMs: Long): Outcome {

@@ -197,4 +197,107 @@ class RokuTestStreamParserTest {
         p.onLine("""{"type":"test_pass","suite":"S","test":"t"}""", taskStart)
         assertTrue(p.events.isEmpty())
     }
+
+    @Test
+    fun `replayed previous run is discarded when a newer fresh sentinel arrives`() {
+        // Back-to-back runs <120s apart: the console buffer replays the previous run's
+        // sentinel (still within the freshness window) and its START/events. The newer
+        // run's sentinel must reset the window so only the new run's events count.
+        val p = parser()
+        p.onLine(freshSentinel(offsetMs = -60_000L), taskStart)  // previous run, 60s old but "fresh"
+        p.onLine("[KOTLINTEST_START]", taskStart)
+        p.onLine("""{"type":"test_pass","suite":"OldSuite","test":"oldTest"}""", taskStart)
+        assertEquals(1, p.events.size)
+
+        p.onLine(freshSentinel(offsetMs = 1_000L), taskStart)     // current run's sentinel
+        assertTrue(p.events.isEmpty())
+        assertTrue(logLines.any { it.contains("discarding 1 replayed event") })
+
+        p.onLine("[KOTLINTEST_START]", taskStart)
+        p.onLine("""{"type":"test_pass","suite":"NewSuite","test":"newTest"}""", taskStart)
+        val outcome = p.onLine("[KOTLINTEST_END]", taskStart)
+
+        assertEquals(Outcome.Completed, outcome)
+        assertEquals(1, p.events.size)
+        assertEquals("NewSuite", p.events[0].suite)
+        assertEquals("newTest", p.events[0].test)
+    }
+
+    @Test
+    fun `re-arm resets inTestOutput - json after newer sentinel needs a new START`() {
+        val p = parser()
+        p.onLine(freshSentinel(offsetMs = -90_000L), taskStart)
+        p.onLine("[KOTLINTEST_START]", taskStart)
+        p.onLine("""{"type":"test_pass","suite":"OldSuite","test":"oldTest"}""", taskStart)
+        p.onLine(freshSentinel(offsetMs = 2_000L), taskStart)
+        assertTrue(p.events.isEmpty())
+        p.onLine("""{"type":"test_pass","suite":"S","test":"t"}""", taskStart)
+        assertTrue("not in test output until new START", p.events.isEmpty())
+        p.onLine("[KOTLINTEST_START]", taskStart)
+        p.onLine("""{"type":"test_pass","suite":"S","test":"t"}""", taskStart)
+        assertEquals(Outcome.Completed, p.onLine("[KOTLINTEST_END]", taskStart))
+        assertEquals(1, p.events.size)
+    }
+
+    @Test
+    fun `newer fresh sentinel during EXIT_GRACE re-arms instead of failing`() {
+        // A replayed exit line from the previous run puts the parser in EXIT_GRACE;
+        // the current run's sentinel proves a new run started - re-arm, don't fail.
+        val p = parser()
+        p.onLine(freshSentinel(offsetMs = -60_000L), taskStart)
+        p.onLine("[KOTLINTEST_START]", taskStart)
+        p.onLine(exitLine, taskStart)
+
+        // Even past the 2s grace deadline the sentinel wins over the crash verdict
+        assertEquals(Outcome.InProgress, p.onLine(freshSentinel(offsetMs = 1_000L), taskStart + 5_000))
+
+        p.onLine("[KOTLINTEST_START]", taskStart + 5_000)
+        p.onLine("""{"type":"test_pass","suite":"NewSuite","test":"newTest"}""", taskStart + 5_000)
+        assertEquals(Outcome.Completed, p.onLine("[KOTLINTEST_END]", taskStart + 5_000))
+        assertEquals(1, p.events.size)
+        // Exit state was reset: stream end afterwards is not a crash
+        assertEquals(Outcome.InProgress, p.onStreamEnd(taskStart + 6_000))
+    }
+
+    @Test
+    fun `newer fresh sentinel during crash capture discards the stale crash`() {
+        // Previous run crashed; its replayed debugger output starts a crash capture.
+        // The current run's sentinel arriving within the capture window re-arms.
+        val p = parser()
+        p.onLine(freshSentinel(offsetMs = -60_000L), taskStart)
+        p.onLine("BrightScript Micro Debugger.", taskStart)
+        p.onLine("Divide by Zero. (runtime error &h14)", taskStart)
+
+        assertEquals(Outcome.InProgress, p.onLine(freshSentinel(offsetMs = 1_000L), taskStart))
+
+        p.onLine("[KOTLINTEST_START]", taskStart)
+        assertEquals(Outcome.Completed, p.onLine("[KOTLINTEST_END]", taskStart))
+        // Crash state was reset: stream end afterwards is not a crash
+        assertEquals(Outcome.InProgress, p.onStreamEnd(taskStart))
+    }
+
+    @Test
+    fun `adapter second sentinel print after flood is a harmless re-arm`() {
+        // JsonTestAdapter prints the sentinel, floods 100 lines, prints the SAME sentinel
+        // again, THEN emits START. The second print resets before any events exist.
+        val p = parser()
+        p.onLine(freshSentinel(), taskStart)
+        for (i in 0 until 100) p.onLine("[KOTLINTEST_BUFFER_FLUSH:123:$i]", taskStart)
+        p.onLine(freshSentinel(), taskStart)
+        p.onLine("[KOTLINTEST_START]", taskStart)
+        p.onLine("""{"type":"test_pass","suite":"S","test":"t"}""", taskStart)
+        assertEquals(Outcome.Completed, p.onLine("[KOTLINTEST_END]", taskStart))
+        assertEquals(1, p.events.size)
+    }
+
+    @Test
+    fun `stale sentinel while armed does not reset the current run`() {
+        val p = parser()
+        p.onLine(freshSentinel(), taskStart)
+        p.onLine("[KOTLINTEST_START]", taskStart)
+        p.onLine("""{"type":"test_pass","suite":"S","test":"t"}""", taskStart)
+        p.onLine("===KOTLINTEST_SENTINEL_${taskStart - 600_000}===", taskStart)
+        assertEquals(1, p.events.size)
+        assertEquals(Outcome.Completed, p.onLine("[KOTLINTEST_END]", taskStart))
+    }
 }

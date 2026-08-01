@@ -65,15 +65,13 @@ abstract class RunRokuTestsTask : DefaultTask() {
         logger.lifecycle("Timeout: ${timeoutMs / 1000} seconds")
         logger.lifecycle("")
 
-        val results = mutableListOf<TestEvent>()
         val parser = RokuTestStreamParser(
             taskStartMillis = System.currentTimeMillis(),
             log = { logger.lifecycle(it) },
         )
-        parser.onEvent = { event ->
-            results.add(event)
-            logTestEvent(event)
-        }
+        // Real-time logging only. Results are read from parser.events at the end: a re-arm on a
+        // newer sentinel discards replayed events there, which a local copy would wrongly keep.
+        parser.onEvent = { event -> logTestEvent(event) }
 
         var testCompleted = false
         var crash: RokuTestStreamParser.Outcome.Crashed? = null
@@ -119,6 +117,7 @@ abstract class RunRokuTestsTask : DefaultTask() {
         }
 
         // Write results (even on crash - partial results help diagnosis)
+        val results = parser.events.toList()
         writeJsonResults(results)
         writeJUnitXml(results)
 
