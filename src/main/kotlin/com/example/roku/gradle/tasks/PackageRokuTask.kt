@@ -1,6 +1,7 @@
 package com.example.roku.gradle.tasks
 
 import org.gradle.api.DefaultTask
+import org.gradle.api.GradleException
 import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.file.RegularFileProperty
@@ -92,6 +93,7 @@ abstract class PackageRokuTask : DefaultTask() {
     fun packageApp() {
         val zipFile = outputZip.get().asFile
         zipFile.parentFile.mkdirs()
+        entryOrigins.clear()
 
         ZipOutputStream(zipFile.outputStream()).use { zip ->
             // Add manifest if exists
@@ -221,7 +223,26 @@ abstract class PackageRokuTask : DefaultTask() {
         logger.lifecycle("Created Roku package: ${zipFile.absolutePath}")
     }
 
+    /**
+     * Origin of every entry written to the zip so far, keyed case-insensitively
+     * (Roku package paths are case-insensitive). Same-named entries staged from
+     * different origins — e.g. two runtime jars both shipping a flat Foo.brs —
+     * must fail loudly here instead of dying later with an opaque ZipException
+     * (or worse, silently shadowing each other on device).
+     */
+    private val entryOrigins = mutableMapOf<String, java.io.File>()
+
     private fun addToZip(zip: ZipOutputStream, file: java.io.File, entryPath: String) {
+        val previous = entryOrigins.putIfAbsent(entryPath.lowercase(), file)
+        if (previous != null) {
+            throw GradleException(
+                "Duplicate package entry '$entryPath' staged from two different origins:\n" +
+                    "  - ${previous.absolutePath}\n" +
+                    "  - ${file.absolutePath}\n" +
+                    "Both would land on the same case-insensitive path in the Roku package. " +
+                    "Rename one of the source files (or exclude one origin) before packaging."
+            )
+        }
         zip.putNextEntry(ZipEntry(entryPath))
         file.inputStream().use { it.copyTo(zip) }
         zip.closeEntry()

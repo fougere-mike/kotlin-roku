@@ -167,9 +167,13 @@ class RokuPlugin : Plugin<Project> {
                 outputDirectory.set(project.layout.buildDirectory.dir("brs/brs/main/components"))
             }
 
-            // Test compilation mirrors the components wiring: it references main classes
+            // Test compilation mirrors the components wiring: it references main classes.
+            // compileComponentsKotlinBrs writes into brs/brs/main (the main classes dir this
+            // task consumes), so Gradle 8.14 implicit-dependency validation requires the
+            // explicit dependsOn.
             if (name == "compileTestKotlinBrs") {
                 dependsOn("compileKotlinBrs")
+                dependsOn("compileComponentsKotlinBrs")
                 libraries.from(project.layout.buildDirectory.dir("brs/brs/main/source"))
             }
         }

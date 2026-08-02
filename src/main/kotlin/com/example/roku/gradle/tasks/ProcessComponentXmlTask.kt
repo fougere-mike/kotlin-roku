@@ -47,7 +47,8 @@ abstract class ProcessComponentXmlTask : DefaultTask() {
             // Exceptions contains exception classes used throughout stdlib
             "ExceptionsKt.brs",
             // StringBuilder is commonly used by toString implementations
-            "StringBuilderKt.brs"
+            // (source file is StringBuilderBrs.kt, so the runtime ships StringBuilderBrsKt.brs)
+            "StringBuilderBrsKt.brs"
         )
 
         /**
@@ -340,7 +341,12 @@ abstract class ProcessComponentXmlTask : DefaultTask() {
             when {
                 stdlibFileNames.contains(dep) -> requiredStdlib.add(dep)
                 mainSourceFileNames.contains(dep) -> requiredMainSource.add(dep)
-                componentFileNames.contains(dep) && dep != currentComponentPath -> requiredComponents.add(dep)
+                componentFileNames.contains(dep) -> if (dep != currentComponentPath) requiredComponents.add(dep)
+                else -> logger.warn(
+                    "deps.json for ${componentDeps.component}: dependency '$dep' matches no staged " +
+                        "stdlib/main/component file — dropped from <script> injection. If the component " +
+                        "calls into it, the app will crash on device."
+                )
             }
         }
 
