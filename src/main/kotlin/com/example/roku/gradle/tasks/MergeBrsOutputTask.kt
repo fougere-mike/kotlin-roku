@@ -1,6 +1,7 @@
 package com.example.roku.gradle.tasks
 
 import org.gradle.api.DefaultTask
+import org.gradle.api.GradleException
 import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.tasks.*
@@ -14,8 +15,12 @@ import java.io.File
  * - Kotlin compiles .kt files to BrightScript
  * - This task merges both outputs into a single directory for packaging
  *
- * Kotlin output takes precedence over BrighterScript output for files with the same name,
- * enabling incremental migration from BrighterScript to Kotlin.
+ * Same-named files arriving from different origins FAIL the build, naming both
+ * origin paths (mirroring PackageRokuTask's duplicate-entry guard — packageHybridRoku
+ * zips from this single merged tree, so the zip-level guard can never fire for hybrid
+ * packages and collisions must be caught here). Byte-identical duplicates are skipped
+ * as benign. When migrating a file to Kotlin, delete the superseded BrighterScript
+ * source instead of relying on overlay precedence.
  */
 @CacheableTask
 abstract class MergeBrsOutputTask : DefaultTask() {
@@ -74,10 +79,17 @@ abstract class MergeBrsOutputTask : DefaultTask() {
         }
         output.mkdirs()
 
+        // Origin of every merged entry, keyed by case-insensitive relative path
+        // (Roku package paths are case-insensitive). See stageEntry.
+        val entryOrigins = mutableMapOf<String, File>()
+
         // Step 1: Copy BrighterScript staging as base layer
         if (bsStaging.exists()) {
             logger.lifecycle("Copying BrighterScript staging from: ${bsStaging.absolutePath}")
             bsStaging.copyRecursively(output)
+            bsStaging.walkTopDown().filter { it.isFile }.forEach { file ->
+                entryOrigins[file.relativeTo(bsStaging).path.lowercase()] = file
+            }
             logger.lifecycle("  Copied ${countFiles(output)} files")
         } else {
             logger.warn("BrighterScript staging directory does not exist: ${bsStaging.absolutePath}")
@@ -103,18 +115,12 @@ abstract class MergeBrsOutputTask : DefaultTask() {
             ktSource.walkTopDown()
                 .filter { it.isFile && it.extension == "brs" }
                 .forEach { file ->
-                    val relativePath = file.relativeTo(ktSource).path
-                    val destFile = File(sourceDir, relativePath)
-                    destFile.parentFile.mkdirs()
-
-                    val isOverwrite = destFile.exists()
-                    file.copyTo(destFile, overwrite = true)
-                    overlayCount++
-
-                    if (isOverwrite) {
-                        logger.lifecycle("  Overlaid Kotlin source (replaced BS): ${file.name}")
-                    } else {
+                    val destFile = File(sourceDir, file.relativeTo(ktSource).path)
+                    if (stageEntry(entryOrigins, output, file, destFile)) {
+                        overlayCount++
                         logger.lifecycle("  Added Kotlin source: ${file.name}")
+                    } else {
+                        logger.lifecycle("  Skipped identical duplicate: ${file.name}")
                     }
                 }
             logger.lifecycle("Merged $overlayCount Kotlin source files")
@@ -147,23 +153,22 @@ abstract class MergeBrsOutputTask : DefaultTask() {
                         if (targetDir != null) {
                             // Place alongside the matching XML file
                             val destFile = File(targetDir, brsFile.name)
-                            val isOverwrite = destFile.exists()
-                            brsFile.copyTo(destFile, overwrite = true)
-                            componentCount++
-
-                            if (isOverwrite) {
-                                logger.lifecycle("  Overlaid Kotlin component (replaced BS): ${brsFile.name} -> ${targetDir.relativeTo(output)}")
-                            } else {
+                            if (stageEntry(entryOrigins, output, brsFile, destFile)) {
+                                componentCount++
                                 logger.lifecycle("  Added Kotlin component: ${brsFile.name} -> ${targetDir.relativeTo(output)}")
+                            } else {
+                                logger.lifecycle("  Skipped identical duplicate: ${brsFile.name}")
                             }
                         } else {
                             // No matching XML found - this might be a new Kotlin-only component
                             // Place in components root or a kotlin subdirectory
                             val destFile = File(componentsDir, brsFile.name)
-                            destFile.parentFile.mkdirs()
-                            brsFile.copyTo(destFile, overwrite = true)
-                            componentCount++
-                            logger.lifecycle("  Added Kotlin component (no XML match): ${brsFile.name}")
+                            if (stageEntry(entryOrigins, output, brsFile, destFile)) {
+                                componentCount++
+                                logger.lifecycle("  Added Kotlin component (no XML match): ${brsFile.name}")
+                            } else {
+                                logger.lifecycle("  Skipped identical duplicate: ${brsFile.name}")
+                            }
                         }
                     }
                 logger.lifecycle("Merged $componentCount Kotlin component files")
@@ -199,20 +204,17 @@ abstract class MergeBrsOutputTask : DefaultTask() {
                         return@forEach
                     }
 
-                    val destFile = File(sourceDir, brsFile.name)
-                    // Case-insensitive check for existing files
-                    val existingFile = sourceDir.listFiles()?.find {
-                        it.name.equals(brsFile.name, ignoreCase = true)
-                    }
-                    if (existingFile != null) {
-                        skippedCount++
-                        logger.lifecycle("  Skipped stdlib file (already exists): ${brsFile.name}")
-                    } else {
-                        brsFile.copyTo(destFile)
+                    // A same-named file already merged from another origin with DIFFERENT
+                    // content fails here; the old skip-if-exists silently dropped a needed
+                    // stdlib file whenever anything else claimed its name first.
+                    if (stageEntry(entryOrigins, output, brsFile, File(sourceDir, brsFile.name))) {
                         stdlibCount++
+                    } else {
+                        skippedCount++
+                        logger.lifecycle("  Skipped identical stdlib duplicate: ${brsFile.name}")
                     }
                 }
-                logger.lifecycle("Added $stdlibCount Kotlin stdlib runtime files (skipped $skippedCount existing, $emptyCount empty)")
+                logger.lifecycle("Added $stdlibCount Kotlin stdlib runtime files (skipped $skippedCount identical, $emptyCount empty)")
             }
         }
 
@@ -222,5 +224,48 @@ abstract class MergeBrsOutputTask : DefaultTask() {
 
     private fun countFiles(dir: File): Int {
         return dir.walkTopDown().filter { it.isFile }.count()
+    }
+
+    companion object {
+        /**
+         * Claims [dest]'s merged path for [origin] and copies the file, guarding against
+         * cross-origin collisions (pure logic, unit-tested separately from the Gradle
+         * machinery). [entryOrigins] maps each already-merged relative path (lowercased —
+         * Roku package paths are case-insensitive) to the file it came from.
+         *
+         * Returns true when the file was copied, false when it was skipped as a
+         * byte-identical duplicate of an already-merged file (benign — unlike a zip,
+         * the merge tree tolerates the same content arriving twice).
+         *
+         * @throws GradleException when a DIFFERENT file already claimed the path,
+         *   naming both origins (mirrors PackageRokuTask's duplicate-entry guard).
+         */
+        internal fun stageEntry(
+            entryOrigins: MutableMap<String, File>,
+            outputRoot: File,
+            origin: File,
+            dest: File,
+        ): Boolean {
+            val entryPath = dest.relativeTo(outputRoot).path
+            val previous = entryOrigins.putIfAbsent(entryPath.lowercase(), origin)
+            if (previous != null) {
+                if (previous.readBytes().contentEquals(origin.readBytes())) {
+                    return false
+                }
+                throw GradleException(
+                    "Duplicate merged-staging entry '$entryPath' staged from two different origins:\n" +
+                        "  - ${previous.absolutePath}\n" +
+                        "  - ${origin.absolutePath}\n" +
+                        "Both would land on the same case-insensitive path in the Roku package. " +
+                        "Rename or remove one of them before packaging (when migrating a file to " +
+                        "Kotlin, delete the superseded BrighterScript source)."
+                )
+            }
+            dest.parentFile?.mkdirs()
+            // overwrite=false: the origin map is the source of truth, so an on-disk hit the
+            // map missed is a staging bug that must surface, not be papered over.
+            origin.copyTo(dest, overwrite = false)
+            return true
+        }
     }
 }
