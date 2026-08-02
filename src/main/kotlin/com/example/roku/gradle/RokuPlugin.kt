@@ -11,6 +11,7 @@ import com.example.roku.gradle.tasks.PackageRokuTask
 import com.example.roku.gradle.tasks.ProcessComponentXmlTask
 import com.example.roku.gradle.tasks.RunRokuTestsTask
 import com.example.roku.gradle.tasks.StageRokuTestSourceTask
+import com.example.roku.gradle.tasks.ValidateComponentIncludesTask
 import org.gradle.api.Plugin
 import org.gradle.api.Project
 import org.gradle.api.artifacts.Configuration
@@ -52,6 +53,12 @@ class RokuPlugin : Plugin<Project> {
             "rokuTest",
             RokuTestExtension::class.java,
             project
+        )
+
+        // Create Roku validation extension
+        val rokuValidationExtension = project.extensions.create(
+            "rokuValidation",
+            RokuValidationExtension::class.java
         )
 
         // Configure BRS target immediately after plugin apply
@@ -168,7 +175,7 @@ class RokuPlugin : Plugin<Project> {
         }
 
         // Register tasks
-        registerTasks(project, rokuExtension, rokuTestExtension, brsRuntimeConfig, brsTestRuntimeConfig, brsCompilerConfig, brsStdlibConfig)
+        registerTasks(project, rokuExtension, rokuTestExtension, rokuValidationExtension, brsRuntimeConfig, brsTestRuntimeConfig, brsCompilerConfig, brsStdlibConfig)
 
         // Register hybrid build tasks if BrighterScript is enabled
         project.afterEvaluate {
@@ -182,6 +189,7 @@ class RokuPlugin : Plugin<Project> {
         project: Project,
         extension: RokuExtension,
         testExtension: RokuTestExtension,
+        validationExtension: RokuValidationExtension,
         brsRuntimeConfig: org.gradle.api.artifacts.Configuration,
         brsTestRuntimeConfig: org.gradle.api.artifacts.Configuration,
         brsCompilerConfig: org.gradle.api.artifacts.Configuration,
@@ -287,6 +295,26 @@ class RokuPlugin : Plugin<Project> {
             }
         }
 
+        // Validate component <script> includes for the MAIN package (see task KDoc).
+        val validateIncludesTask = project.tasks.register("validateComponentIncludes", ValidateComponentIncludesTask::class.java).apply {
+            configure {
+                group = "roku"
+                description = "Validate that every packaged component's <script> list covers all calls its scripts make"
+
+                dependsOn("compileKotlinBrs")
+                dependsOn("compileComponentsKotlinBrs")
+                dependsOn(processComponentXmlTask)
+
+                processedXmlDir.set(processComponentXmlTask.flatMap { it.outputXmlDir })
+                compiledComponentsDir.set(compiledComponentsDirProvider)
+                stagedSourceDir.set(compiledMainSourceDir)
+                runtimeBrs.from(stdlibBrsFilesProvider)
+                mode.set(validationExtension.includeMode)
+                extraBuiltins.set(validationExtension.extraBuiltins)
+                reportFile.set(project.layout.buildDirectory.file("roku/validation/componentIncludes.txt"))
+            }
+        }
+
         // Package task: creates Roku .zip
         val packageTask = project.tasks.register("packageRoku", PackageRokuTask::class.java).apply {
             configure {
@@ -297,6 +325,7 @@ class RokuPlugin : Plugin<Project> {
                 dependsOn("compileKotlinBrs")
                 dependsOn("compileComponentsKotlinBrs")
                 dependsOn(processComponentXmlTask)
+                dependsOn(validateIncludesTask)
 
                 compiledBrs.set(project.layout.buildDirectory.dir("brs/brs/main/source"))
                 manifest.set(extension.manifestFile)
@@ -383,6 +412,29 @@ class RokuPlugin : Plugin<Project> {
             }
         }
 
+        // Validate component <script> includes for the TEST package. Same components as the
+        // main package, but the source/ payload is the staged test sources plus the
+        // kotlin.test runtime.
+        val validateTestIncludesTask = project.tasks.register("validateTestComponentIncludes", ValidateComponentIncludesTask::class.java).apply {
+            configure {
+                group = "roku test"
+                description = "Validate component <script> includes against the Roku TEST package payload"
+
+                dependsOn(stageTestSourceTask)
+                dependsOn("compileComponentsKotlinBrs")
+                dependsOn(processComponentXmlTask)
+
+                processedXmlDir.set(processComponentXmlTask.flatMap { it.outputXmlDir })
+                compiledComponentsDir.set(compiledComponentsDirProvider)
+                stagedSourceDir.set(stageTestSourceTask.flatMap { it.outputDir })
+                runtimeBrs.from(stdlibBrsFilesProvider)
+                runtimeBrs.from(testRuntimeBrsFilesProvider)
+                mode.set(validationExtension.includeMode)
+                extraBuiltins.set(validationExtension.extraBuiltins)
+                reportFile.set(project.layout.buildDirectory.file("roku/validation/testComponentIncludes.txt"))
+            }
+        }
+
         // Package tests task: creates Roku test app .zip
         val packageTestsTask = project.tasks.register("packageRokuTests", PackageRokuTask::class.java).apply {
             configure {
@@ -392,6 +444,7 @@ class RokuPlugin : Plugin<Project> {
                 dependsOn(stageTestSourceTask)
                 dependsOn("compileComponentsKotlinBrs")
                 dependsOn(processComponentXmlTask)
+                dependsOn(validateTestIncludesTask)
 
                 compiledBrs.set(stageTestSourceTask.flatMap { it.outputDir })
 
