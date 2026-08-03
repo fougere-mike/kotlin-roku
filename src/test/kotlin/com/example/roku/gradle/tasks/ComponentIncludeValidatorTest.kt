@@ -106,6 +106,103 @@ class ComponentIncludeValidatorTest {
         assertTrue(calls.contains("other"))
     }
 
+    // ---- extractBareRefs ----
+
+    @Test
+    fun `exact Any method-default assignment shape is extracted as a bare reference`() {
+        val refs = ComponentIncludeValidator.extractBareRefs(
+            "function Widget_create()\n" +
+                "    this = {}\n" +
+                "    this.equals = Any_equals_AnyN_k_\n" +
+                "    this.hashCode = Any_hashCode_k_\n" +
+                "    this.toString = Any_toString_k_\n" +
+                "    return this\n" +
+                "end function\n",
+            knownNames = emptySet(), // mangled shape alone must be enough (UNDEFINED lexicon)
+        )
+        assertEquals(setOf("Any_equals_AnyN_k_", "Any_hashCode_k_", "Any_toString_k_"), refs)
+    }
+
+    @Test
+    fun `call-position and definition-line occurrences are not references`() {
+        val refs = ComponentIncludeValidator.extractBareRefs(
+            "function doHelp(x)\n    return x\nend function\n" +
+                "function caller()\n    y = doHelp(1)\n    return y\nend function\n",
+            knownNames = setOf("dohelp", "caller"),
+        )
+        assertEquals(emptySet<String>(), refs)
+    }
+
+    @Test
+    fun `locals shadowing an indexed name are not references`() {
+        // Real-corpus shape: lambda parameter `init` vs SceneGraph `sub init()` definitions.
+        val refs = ComponentIncludeValidator.extractBareRefs(
+            "function LayoutBuilder_group(init)\n" +
+                "    if init = invalid then\n" +
+                "        cb = Task17_onClick_k_\n" +
+                "    end if\n" +
+                "    init.invoke_AnyN_k_(cb)\n" +
+                "    other_fn_k_(init)\n" +
+                "end function\n",
+            knownNames = setOf("init"),
+        )
+        assertEquals(setOf("Task17_onClick_k_"), refs)
+    }
+
+    @Test
+    fun `assignment target is not a reference but its right-hand side is`() {
+        val refs = ComponentIncludeValidator.extractBareRefs(
+            "function f()\n    doHelp = Any_equals_AnyN_k_\n    return doHelp\nend function\n",
+            knownNames = setOf("dohelp"),
+        )
+        assertEquals(setOf("Any_equals_AnyN_k_"), refs)
+    }
+
+    @Test
+    fun `dotted member access and indexing bases are not references`() {
+        val refs = ComponentIncludeValidator.extractBareRefs(
+            "function f(o)\n    x = o.doHelp\n    y = lookup[0]\n    return y\nend function\n",
+            knownNames = setOf("dohelp", "lookup"),
+        )
+        assertEquals(emptySet<String>(), refs)
+    }
+
+    @Test
+    fun `non-mangled identifiers not in the lexicon are ignored`() {
+        val refs = ComponentIncludeValidator.extractBareRefs(
+            "function f()\n    x = someLocalThing\n    y = Another_k_\n    return y\nend function\n",
+            knownNames = emptySet(),
+        )
+        assertEquals(setOf("Another_k_"), refs)
+    }
+
+    @Test
+    fun `anonymous function parameters are locals and their end function does not truncate the body`() {
+        val refs = ComponentIncludeValidator.extractBareRefs(
+            "function f()\n" +
+                "    cb = function(init)\n        return init\n    end function\n" +
+                "    tail = Tail_k_\n" +
+                "    return cb\n" +
+                "end function\n",
+            knownNames = setOf("init"),
+        )
+        assertEquals(setOf("Tail_k_"), refs)
+    }
+
+    @Test
+    fun `for each and dim targets are locals not references`() {
+        val refs = ComponentIncludeValidator.extractBareRefs(
+            "function f(items)\n" +
+                "    for each item in items\n        print item\n    end for\n" +
+                "    for idx = 0 to 5 step 1\n        print idx\n    end for\n" +
+                "    dim buf[10]\n" +
+                "    return buf\n" +
+                "end function\n",
+            knownNames = setOf("item", "idx", "buf"),
+        )
+        assertEquals(emptySet<String>(), refs)
+    }
+
     // ---- parseScriptUris ----
 
     @Test
@@ -260,6 +357,121 @@ class ComponentIncludeValidatorTest {
             components = listOf(component("Widget", "pkg:/components/Widget/WidgetKt.brs")),
         )
         assertEquals(emptyList<Finding>(), result.findings)
+    }
+
+    @Test
+    fun `bare reference to a name defined only in an unlisted file is a missing include`() {
+        // The AnyKt incident: every root-class _create assigns compiler-emitted method
+        // defaults as bare function values; AnyKt.brs missing from the <script> list was
+        // a device crash no gate could see.
+        val anyKt = brs(
+            "source/AnyKt.brs",
+            "function Any_equals_AnyN_k_(other)\n    return true\nend function\n"
+        )
+        val widget = brs(
+            "components/WidgetKt.brs",
+            "function Widget_create()\n    this = {}\n    this.equals = Any_equals_AnyN_k_\n    return this\nend function\n"
+        )
+        val result = ComponentIncludeValidator.validate(
+            sourceFiles = listOf(anyKt),
+            componentFiles = listOf(widget),
+            components = listOf(component("Widget", "pkg:/components/Widget/WidgetKt.brs")),
+        )
+        val finding = result.findings.single()
+        assertEquals(Finding.Reason.NOT_INCLUDED, finding.reason)
+        assertEquals("Any_equals_AnyN_k_", finding.call)
+        assertEquals(listOf("WidgetKt.brs"), finding.callers)
+        assertEquals(listOf("AnyKt.brs"), finding.definedIn)
+        assertTrue(finding.referenceOnly)
+    }
+
+    @Test
+    fun `bare reference to a mangled name defined nowhere is undefined`() {
+        // Real stdlib shape: this.__get_code = CharCategory___get_code_k_ where the getter
+        // was never emitted anywhere in the package.
+        val widget = brs(
+            "components/WidgetKt.brs",
+            "function Widget_create()\n    this = {}\n    this.__get_code = CharCategory___get_code_k_\n    return this\nend function\n"
+        )
+        val result = ComponentIncludeValidator.validate(
+            sourceFiles = emptyList(),
+            componentFiles = listOf(widget),
+            components = listOf(component("Widget", "pkg:/components/Widget/WidgetKt.brs")),
+        )
+        val finding = result.findings.single()
+        assertEquals(Finding.Reason.UNDEFINED, finding.reason)
+        assertEquals("CharCategory___get_code_k_", finding.call)
+        assertEquals(listOf("WidgetKt.brs"), finding.callers)
+        assertTrue(finding.referenceOnly)
+    }
+
+    @Test
+    fun `name both called and bare-referenced yields one finding not two`() {
+        val helper = brs("source/HelperKt.brs", "function doHelp(x)\n    return x\nend function\n")
+        val widget = brs(
+            "components/WidgetKt.brs",
+            "function Widget_create()\n    this = {}\n    this.help = doHelp\n    y = doHelp(1)\n    return this\nend function\n"
+        )
+        val result = ComponentIncludeValidator.validate(
+            sourceFiles = listOf(helper),
+            componentFiles = listOf(widget),
+            components = listOf(component("Widget", "pkg:/components/Widget/WidgetKt.brs")),
+        )
+        val finding = result.findings.single()
+        assertEquals(Finding.Reason.NOT_INCLUDED, finding.reason)
+        assertEquals("doHelp", finding.call)
+        assertFalse(finding.referenceOnly)
+    }
+
+    @Test
+    fun `bare reference satisfied by a listed defining file produces no findings`() {
+        val anyKt = brs(
+            "source/AnyKt.brs",
+            "function Any_equals_AnyN_k_(other)\n    return true\nend function\n"
+        )
+        val widget = brs(
+            "components/WidgetKt.brs",
+            "function Widget_create()\n    this = {}\n    this.equals = Any_equals_AnyN_k_\n    return this\nend function\n"
+        )
+        val result = ComponentIncludeValidator.validate(
+            sourceFiles = listOf(anyKt),
+            componentFiles = listOf(widget),
+            components = listOf(
+                component("Widget", "pkg:/source/AnyKt.brs", "pkg:/components/Widget/WidgetKt.brs")
+            ),
+        )
+        assertEquals(emptyList<Finding>(), result.findings)
+    }
+
+    @Test
+    fun `bare-reference-looking text inside strings and comments is not flagged`() {
+        val widget = brs(
+            "components/WidgetKt.brs",
+            "sub Widget_init()\n    s = \"Ghost_ref_k_\"\n    ' x = Commented_ref_k_\nend sub\n"
+        )
+        val result = ComponentIncludeValidator.validate(
+            sourceFiles = emptyList(),
+            componentFiles = listOf(widget),
+            components = listOf(component("Widget", "pkg:/components/Widget/WidgetKt.brs")),
+        )
+        assertEquals(emptyList<Finding>(), result.findings)
+    }
+
+    @Test
+    fun `renderReport says referenced for reference-only findings and called for calls`() {
+        val helper = brs("source/HelperKt.brs", "function doHelp(x)\n    return x\nend function\n")
+        val widget = brs(
+            "components/WidgetKt.brs",
+            "function Widget_create()\n    this = {}\n    this.equals = Any_missing_k_\n    y = doHelp(1)\n    return this\nend function\n"
+        )
+        val result = ComponentIncludeValidator.validate(
+            sourceFiles = listOf(helper),
+            componentFiles = listOf(widget),
+            components = listOf(component("Widget", "pkg:/components/Widget/WidgetKt.brs")),
+        )
+        val report = ComponentIncludeValidator.renderReport(result)
+        assertTrue(report.contains("UNDEFINED: Any_missing_k_ — referenced (as a function value) from WidgetKt.brs"))
+        assertTrue(report.contains("MISSING INCLUDE: doHelp — called from WidgetKt.brs"))
     }
 
     @Test

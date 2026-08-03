@@ -8,8 +8,8 @@ import java.io.File
  * A SceneGraph component loads ONLY the .brs files its XML lists. A call to a function
  * that lives in an unlisted file (include hole) or that exists nowhere (bad emission)
  * is a hard crash on device. This validator compares ground truth (a definition scan of
- * every packaged .brs) against the bare global calls made by each component's listed
- * scripts.
+ * every packaged .brs) against the bare global calls AND bare function-value references
+ * made by each component's listed scripts.
  *
  * Everything here is deliberately Gradle-free so it can be unit-tested directly;
  * [ValidateComponentIncludesTask] owns the Gradle wiring, logging, and mode enforcement.
@@ -26,6 +26,35 @@ import java.io.File
  *   The generated-code corpus does not use this pattern (invocation goes through
  *   `this.method()`), so in practice this does not produce noise.
  * - Anonymous functions (`function(x)`) are excluded via the keyword allowlist.
+ *
+ * Bare function-value references ([extractBareRefs]): a global function name used OUTSIDE
+ * call position — e.g. the compiler-emitted `this.equals = Any_equals_AnyN_k_` method-default
+ * assignments in every root-class `_create` — crashes identically at call time if its
+ * defining file is unlisted, but is invisible to the call scan above. Reference detection
+ * heuristics and limits:
+ * - Lexicon-gated: a bare identifier counts as a reference only if it matches an indexed
+ *   definition name (classified UNDEFINED/NOT_INCLUDED as usual) or looks compiler-mangled
+ *   (`_k_` suffix or `__kotlin_` prefix) — the latter is what makes UNDEFINED detectable
+ *   for wrong-name emissions. A non-mangled reference to a name defined nowhere is
+ *   indistinguishable from an ordinary variable read and is NOT reported.
+ * - Per-body local exclusion (flow-insensitive): parameter names (named and anonymous
+ *   functions), statement-initial assignment targets, and `for`/`for each`/`dim` targets
+ *   are locals for the whole enclosing body. Reads of a local that shadows a global
+ *   function name are therefore never flagged as references (the generated corpus hits
+ *   this: lambda parameters named `init` vs SceneGraph `sub init()` definitions). The
+ *   flip side: a genuine reference to a global whose name is also assigned locally in the
+ *   same body is suppressed — acceptable, since mangled globals are never assigned.
+ * - Definition lines are excluded; each scan body runs from one definition line to the
+ *   next (BrightScript has no nested named functions, so `end function`/`end sub` of
+ *   anonymous functions cannot truncate a body). Code outside any function/sub is not
+ *   scanned (illegal in BrightScript anyway). Multi-line signatures are not supported
+ *   (the compiler emits single-line signatures).
+ * - Receiver/index positions (`x.member`, `x[i]`) and dotted accesses (`obj.name`) are
+ *   excluded — a global function value cannot be dotted or indexed by name in BrightScript
+ *   without first being assigned to a variable.
+ * - Call-position occurrences use the same follower rule as [extractCalls] (`\s*(`), so
+ *   every occurrence is either a call or a reference, never both — a name seen both ways
+ *   in one component still yields a single finding.
  */
 object ComponentIncludeValidator {
 
@@ -76,6 +105,24 @@ object ComponentIncludeValidator {
     private val XML_COMMENT = Regex("<!--.*?-->", RegexOption.DOT_MATCHES_ALL)
     private val SCRIPT_URI = Regex("<script\\b[^>]*\\buri\\s*=\\s*\"([^\"]+)\"")
 
+    // Reference-scan regexes ([extractBareRefs]). DEFINITION_LINE additionally captures the
+    // rest of the signature line (parameter list) for local-name collection.
+    private val DEFINITION_LINE = Regex("(?im)^[ \t]*(?:function|sub)\\s+[a-z_][a-z0-9_]*\\s*\\(([^\n]*)")
+    private val ANONYMOUS_FUNCTION = Regex("(?i)(?<![.\\w])(?:function|sub)[ \t]*\\(([^\n)]*)")
+    private val PARAMETER_NAME = Regex("(?i)[(,][ \t]*([a-z_][a-z0-9_]*)")
+    private val ASSIGNMENT_TARGET = Regex("(?im)(?:^|:)[ \t]*([a-z_][a-z0-9_]*)[ \t]*(?:[-+*/\\\\]|<<|>>)?=")
+    private val LOOP_OR_DIM_TARGET = Regex("(?i)(?<![.\\w])(?:for[ \t]+each[ \t]+|for[ \t]+|dim[ \t]+)([a-z_][a-z0-9_]*)")
+    private val BARE_IDENTIFIER = Regex("(?<![.\\w])([A-Za-z_][A-Za-z0-9_]*)")
+
+    /**
+     * Compiler-mangled global function name shape: `_k_`-suffixed mangled Kotlin declarations
+     * (incl. the `Any_*_k_` method defaults) or `__kotlin_*` runtime helpers. These shapes make
+     * accidental collision with hand-written locals implausible, which is what lets a bare
+     * reference to one of them be reported UNDEFINED when it matches no definition anywhere.
+     */
+    private fun isCompilerMangled(name: String): Boolean =
+        name.endsWith("_k_", ignoreCase = true) || name.startsWith("__kotlin_", ignoreCase = true)
+
     /** A packaged component XML and the script URIs it lists. */
     data class ComponentScripts(
         val name: String,
@@ -91,6 +138,13 @@ object ComponentIncludeValidator {
         val reason: Reason,
         /** For NOT_INCLUDED: the packaged files that do define the call. */
         val definedIn: List<String> = emptyList(),
+        /**
+         * True when the name was seen ONLY as a bare function-value reference (never in call
+         * position) in this component's listed scripts — the `this.equals = Any_equals_AnyN_k_`
+         * emission class. Crashes at call time just like a bad call; the marker exists so the
+         * report says how the name was used.
+         */
+        val referenceOnly: Boolean = false,
     ) {
         enum class Reason {
             /** The called function is defined in NO packaged .brs file (bad emission / wrong mangled name). */
@@ -110,6 +164,12 @@ object ComponentIncludeValidator {
         val definitionCount: Int,
     )
 
+    /** Per-component usage evidence for one name, merged across call and reference sightings. */
+    private class Usage(val displayName: String, val definedIn: Set<String> = emptySet()) {
+        val callers = mutableSetOf<String>()
+        var seenAsCall = false
+    }
+
     /** Strips string literals, then `'` comments, then REM comments. */
     fun stripStringsAndComments(text: String): String {
         var t = STRING_LITERAL.replace(text, "\"\"")
@@ -125,6 +185,47 @@ object ComponentIncludeValidator {
     /** Bare global calls in already-stripped text; original case preserved for reporting. */
     fun extractCalls(strippedText: String): Set<String> =
         BARE_CALL.findAll(strippedText).map { it.groupValues[1] }.toSet()
+
+    /**
+     * Bare function-value references in already-stripped text; original case preserved.
+     *
+     * A reference is a bare identifier outside call position that either matches a name in
+     * [knownNames] (the lowercased definition index) or looks compiler-mangled. Definition
+     * lines, per-body locals, and receiver/index positions are excluded — see the class KDoc
+     * for the full heuristics and limits.
+     */
+    fun extractBareRefs(strippedText: String, knownNames: Set<String>): Set<String> {
+        val refs = mutableSetOf<String>()
+        val definitionLines = DEFINITION_LINE.findAll(strippedText).toList()
+        for ((index, definition) in definitionLines.withIndex()) {
+            // Body runs to the next definition line: anonymous `end function`s can't truncate
+            // it, and the trailing `end function`/`end sub` keywords never match the lexicon.
+            val bodyStart = definition.range.last + 1
+            val bodyEnd = definitionLines.getOrNull(index + 1)?.range?.first ?: strippedText.length
+            val body = strippedText.substring(bodyStart, bodyEnd)
+
+            val localNames = mutableSetOf<String>()
+            fun addParameters(parameterList: String) = PARAMETER_NAME.findAll("($parameterList")
+                .forEach { localNames.add(it.groupValues[1].lowercase()) }
+            addParameters(definition.groupValues[1])
+            ANONYMOUS_FUNCTION.findAll(body).forEach { addParameters(it.groupValues[1]) }
+            ASSIGNMENT_TARGET.findAll(body).forEach { localNames.add(it.groupValues[1].lowercase()) }
+            LOOP_OR_DIM_TARGET.findAll(body).forEach { localNames.add(it.groupValues[1].lowercase()) }
+
+            for (match in BARE_IDENTIFIER.findAll(body)) {
+                val name = match.groupValues[1]
+                if (name.lowercase() in localNames) continue
+                if (name.lowercase() !in knownNames && !isCompilerMangled(name)) continue
+                val afterName = match.range.last + 1
+                if (afterName < body.length && (body[afterName] == '.' || body[afterName] == '[')) continue
+                var next = afterName
+                while (next < body.length && body[next].isWhitespace()) next++
+                if (next < body.length && body[next] == '(') continue // call position: extractCalls owns it
+                refs.add(name)
+            }
+        }
+        return refs
+    }
 
     /** Script URIs listed by a component XML, in document order (XML comments ignored). */
     fun parseScriptUris(xmlContent: String): List<String> =
@@ -163,6 +264,8 @@ object ComponentIncludeValidator {
 
         val callsCache = mutableMapOf<File, Set<String>>()
         fun calls(f: File): Set<String> = callsCache.getOrPut(f) { extractCalls(stripped(f)) }
+        val refsCache = mutableMapOf<File, Set<String>>()
+        fun refs(f: File): Set<String> = refsCache.getOrPut(f) { extractBareRefs(stripped(f), definitions.keys) }
 
         val findings = mutableListOf<Finding>()
         for (component in components) {
@@ -187,28 +290,41 @@ object ComponentIncludeValidator {
                 }
             }
 
-            // callName(lower) -> caller file names / defining file names
-            val undefined = mutableMapOf<String, Pair<String, MutableSet<String>>>()
-            val notIncluded = mutableMapOf<String, Triple<String, MutableSet<String>, Set<String>>>()
-            for (file in listedFiles) {
-                for (call in calls(file)) {
-                    val key = call.lowercase()
-                    if (key in builtins) continue
-                    val definedIn = definitions[key]
-                    if (definedIn == null) {
-                        undefined.getOrPut(key) { call to mutableSetOf() }.second.add(file.name)
-                    } else if (definedIn.none { it.lowercase() in allowedNames }) {
-                        notIncluded.getOrPut(key) { Triple(call, mutableSetOf(), definedIn.toSet()) }
-                            .second.add(file.name)
-                    }
+            // callName(lower) -> usage evidence merged across calls and bare references, so a
+            // name seen both ways yields one finding per component, not two.
+            val undefined = mutableMapOf<String, Usage>()
+            val notIncluded = mutableMapOf<String, Usage>()
+            fun record(name: String, file: File, asCall: Boolean) {
+                val key = name.lowercase()
+                if (key in builtins) return
+                val definedIn = definitions[key]
+                val usage = when {
+                    definedIn == null -> undefined.getOrPut(key) { Usage(name) }
+                    definedIn.none { it.lowercase() in allowedNames } ->
+                        notIncluded.getOrPut(key) { Usage(name, definedIn.toSet()) }
+                    else -> return
                 }
+                usage.callers.add(file.name)
+                if (asCall) usage.seenAsCall = true
             }
-            undefined.values.sortedBy { it.first.lowercase() }.forEach { (call, callers) ->
-                findings.add(Finding(component.name, call, callers.sorted(), Finding.Reason.UNDEFINED))
+            for (file in listedFiles) {
+                calls(file).forEach { record(it, file, asCall = true) }
+                refs(file).forEach { record(it, file, asCall = false) }
             }
-            notIncluded.values.sortedBy { it.first.lowercase() }.forEach { (call, callers, definedIn) ->
+            undefined.values.sortedBy { it.displayName.lowercase() }.forEach { u ->
                 findings.add(
-                    Finding(component.name, call, callers.sorted(), Finding.Reason.NOT_INCLUDED, definedIn.sorted())
+                    Finding(
+                        component.name, u.displayName, u.callers.sorted(), Finding.Reason.UNDEFINED,
+                        referenceOnly = !u.seenAsCall,
+                    )
+                )
+            }
+            notIncluded.values.sortedBy { it.displayName.lowercase() }.forEach { u ->
+                findings.add(
+                    Finding(
+                        component.name, u.displayName, u.callers.sorted(), Finding.Reason.NOT_INCLUDED,
+                        u.definedIn.sorted(), referenceOnly = !u.seenAsCall,
+                    )
                 )
             }
         }
@@ -224,13 +340,14 @@ object ComponentIncludeValidator {
             appendLine()
             appendLine("Component '$component':")
             for (f in componentFindings) {
+                val usedFrom = if (f.referenceOnly) "referenced (as a function value) from" else "called from"
                 when (f.reason) {
                     Finding.Reason.UNDEFINED -> appendLine(
-                        "  UNDEFINED: ${f.call} — called from ${f.callers.joinToString()}; " +
+                        "  UNDEFINED: ${f.call} — $usedFrom ${f.callers.joinToString()}; " +
                             "not defined in any packaged .brs file"
                     )
                     Finding.Reason.NOT_INCLUDED -> appendLine(
-                        "  MISSING INCLUDE: ${f.call} — called from ${f.callers.joinToString()}; " +
+                        "  MISSING INCLUDE: ${f.call} — $usedFrom ${f.callers.joinToString()}; " +
                             "defined in ${f.definedIn.joinToString()} which is not in this component's <script> list"
                     )
                     Finding.Reason.SCRIPT_MISSING -> appendLine(
