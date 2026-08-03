@@ -38,7 +38,8 @@ import java.io.File
  *   for wrong-name emissions. A non-mangled reference to a name defined nowhere is
  *   indistinguishable from an ordinary variable read and is NOT reported.
  * - Per-body local exclusion (flow-insensitive): parameter names (named and anonymous
- *   functions), statement-initial assignment targets, and `for`/`for each`/`dim` targets
+ *   functions), assignment targets in statement position (line start, after `:`, or after
+ *   single-line-if `then`/`else`), and `for`/`for each`/`dim` targets
  *   are locals for the whole enclosing body. Reads of a local that shadows a global
  *   function name are therefore never flagged as references (the generated corpus hits
  *   this: lambda parameters named `init` vs SceneGraph `sub init()` definitions). The
@@ -110,7 +111,11 @@ object ComponentIncludeValidator {
     private val DEFINITION_LINE = Regex("(?im)^[ \t]*(?:function|sub)\\s+[a-z_][a-z0-9_]*\\s*\\(([^\n]*)")
     private val ANONYMOUS_FUNCTION = Regex("(?i)(?<![.\\w])(?:function|sub)[ \t]*\\(([^\n)]*)")
     private val PARAMETER_NAME = Regex("(?i)[(,][ \t]*([a-z_][a-z0-9_]*)")
-    private val ASSIGNMENT_TARGET = Regex("(?im)(?:^|:)[ \t]*([a-z_][a-z0-9_]*)[ \t]*(?:[-+*/\\\\]|<<|>>)?=")
+    // Anchors cover every statement position an assignment can start at: line start, after
+    // ':', and after single-line-if `then`/`else` (whole words — after `then`/`else` the next
+    // token is a statement, so `ident =` there is always an assignment, never a comparison).
+    private val ASSIGNMENT_TARGET =
+        Regex("(?im)(?:^|:|(?<![.\\w])(?:then|else)[ \t]+)[ \t]*([a-z_][a-z0-9_]*)[ \t]*(?:[-+*/\\\\]|<<|>>)?=")
     private val LOOP_OR_DIM_TARGET = Regex("(?i)(?<![.\\w])(?:for[ \t]+each[ \t]+|for[ \t]+|dim[ \t]+)([a-z_][a-z0-9_]*)")
     private val BARE_IDENTIFIER = Regex("(?<![.\\w])([A-Za-z_][A-Za-z0-9_]*)")
 

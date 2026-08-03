@@ -190,6 +190,33 @@ class ComponentIncludeValidatorTest {
     }
 
     @Test
+    fun `single-line if assignment targets are locals not references`() {
+        // Regression (review round 1): `if cond then x = 1` anchors on neither line start
+        // nor ':' — a name assigned only in then/else position must still be a local.
+        val refs = ComponentIncludeValidator.extractBareRefs(
+            "function f(cond)\n" +
+                "    if cond then renderPass = invalid else fallback = makeFallback()\n" +
+                "    print renderPass\n" +
+                "    return fallback\n" +
+                "end function\n",
+            knownNames = setOf("renderpass", "fallback"),
+        )
+        assertEquals(emptySet<String>(), refs)
+    }
+
+    @Test
+    fun `bare reference on a single-line if branch right-hand side is still a reference`() {
+        val refs = ComponentIncludeValidator.extractBareRefs(
+            "function f(cond)\n" +
+                "    if cond then cb = Handler_k_ else this.equals = Any_equals_AnyN_k_\n" +
+                "    return cb\n" +
+                "end function\n",
+            knownNames = emptySet(),
+        )
+        assertEquals(setOf("Handler_k_", "Any_equals_AnyN_k_"), refs)
+    }
+
+    @Test
     fun `for each and dim targets are locals not references`() {
         val refs = ComponentIncludeValidator.extractBareRefs(
             "function f(items)\n" +
