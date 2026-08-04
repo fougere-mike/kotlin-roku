@@ -15,7 +15,8 @@ import java.io.File
  * Gradle task that generates stub .kt files for Layout classes.
  *
  * This task parses Kotlin source files looking for @SGLayout annotations in companion objects,
- * extracts node IDs from the sceneLayout { } DSL, and generates stub files that provide
+ * extracts node IDs from the sceneLayout { } DSL - including embedded custom components
+ * declared via component("Type", id = "...") - and generates stub files that provide
  * IDE support (code completion, navigation).
  *
  * The stubs are generated as top-level classes named `ClassName_Layout` and use the same
@@ -117,75 +118,98 @@ abstract class GenerateLayoutStubsTask : DefaultTask() {
         }
     }
 
-    /**
-     * Information extracted from a source file with @SGLayout.
-     */
-    private data class LayoutInfo(
-        val packageName: String,
-        val className: String,
-        val nodeIds: List<String>
-    )
-
-    /**
-     * Extract layout info from Kotlin source content.
-     * Returns null if no @SGLayout annotation found.
-     */
-    private fun extractLayoutInfo(content: String): LayoutInfo? {
-        // Quick check for @SGLayout annotation
-        if (!content.contains("@SGLayout")) return null
-
-        // Extract package name
-        val packageMatch = Regex("""package\s+([\w.]+)""").find(content)
-        val packageName = packageMatch?.groupValues?.get(1) ?: ""
-
-        // Extract class name - find the first non-companion class
-        val classMatch = Regex("""class\s+(\w+)""").find(content)
-        val className = classMatch?.groupValues?.get(1) ?: return null
-
-        // Extract node IDs from DSL calls
-        val nodeIds = extractNodeIds(content)
-
-        return if (nodeIds.isNotEmpty()) {
-            LayoutInfo(packageName, className, nodeIds)
-        } else null
-    }
-
-    /**
-     * Extract node IDs from sceneLayout DSL calls.
-     *
-     * Looks for patterns like:
-     * - button(id = "xyz")
-     * - label(id = "abc")
-     * - layoutGroup(id = "group1") { ... }
-     */
-    private fun extractNodeIds(content: String): List<String> {
-        val nodeIds = mutableListOf<String>()
-        val builderMethods = setOf(
+    companion object {
+        private val builderMethods = setOf(
             "group", "layoutGroup", "label", "poster", "rectangle",
             "button", "buttonGroup", "textEditBox", "keyboard"
         )
 
-        // Pattern for id = "value" (named argument)
-        val namedArgPattern = Regex(
-            """(${builderMethods.joinToString("|")})\s*\([^)]*id\s*=\s*"([^"]+)""""
+        // \b keeps method names from matching as suffixes of longer identifiers
+        // (e.g. relabel( must not count as label().
+
+        // Pattern for id = "value" (named argument). component(...) declares an
+        // embedded custom component and takes id the same way.
+        private val namedArgPattern = Regex(
+            """\b(${(builderMethods + "component").joinToString("|")})\s*\([^)]*id\s*=\s*"([^"]+)""""
         )
-        namedArgPattern.findAll(content).forEach {
-            nodeIds.add(it.groupValues[2])
-        }
 
         // Pattern for first positional string argument
         // Only use if we didn't already get an id= match for this call
-        val positionalPattern = Regex(
-            """(${builderMethods.joinToString("|")})\s*\(\s*"([^"]+)""""
+        private val positionalPattern = Regex(
+            """\b(${builderMethods.joinToString("|")})\s*\(\s*"([^"]+)""""
         )
-        positionalPattern.findAll(content).forEach {
-            val nodeId = it.groupValues[2]
-            if (nodeId !in nodeIds) {
-                nodeIds.add(nodeId)
-            }
+
+        // component("ComponentType", "id", ...) - the FIRST positional string is the
+        // component type; the id is the SECOND, so it needs its own pattern.
+        private val componentPositionalPattern = Regex(
+            """\bcomponent\s*\(\s*"[^"]+"\s*,\s*"([^"]+)""""
+        )
+
+        /**
+         * Information extracted from a source file with @SGLayout.
+         */
+        internal data class LayoutInfo(
+            val packageName: String,
+            val className: String,
+            val nodeIds: List<String>
+        )
+
+        /**
+         * Extract layout info from Kotlin source content.
+         * Returns null if no @SGLayout annotation found.
+         */
+        internal fun extractLayoutInfo(content: String): LayoutInfo? {
+            // Quick check for @SGLayout annotation
+            if (!content.contains("@SGLayout")) return null
+
+            // Extract package name
+            val packageMatch = Regex("""package\s+([\w.]+)""").find(content)
+            val packageName = packageMatch?.groupValues?.get(1) ?: ""
+
+            // Extract class name - find the first non-companion class
+            val classMatch = Regex("""class\s+(\w+)""").find(content)
+            val className = classMatch?.groupValues?.get(1) ?: return null
+
+            // Extract node IDs from DSL calls
+            val nodeIds = extractNodeIds(content)
+
+            return if (nodeIds.isNotEmpty()) {
+                LayoutInfo(packageName, className, nodeIds)
+            } else null
         }
 
-        return nodeIds.distinct()
+        /**
+         * Extract node IDs from sceneLayout DSL calls.
+         *
+         * Looks for patterns like:
+         * - button(id = "xyz")
+         * - label(id = "abc")
+         * - layoutGroup(id = "group1") { ... }
+         * - component("ShelfView", id = "shelf_view") / component("ShelfView", "shelf_view")
+         */
+        internal fun extractNodeIds(content: String): List<String> {
+            val nodeIds = mutableListOf<String>()
+
+            namedArgPattern.findAll(content).forEach {
+                nodeIds.add(it.groupValues[2])
+            }
+
+            positionalPattern.findAll(content).forEach {
+                val nodeId = it.groupValues[2]
+                if (nodeId !in nodeIds) {
+                    nodeIds.add(nodeId)
+                }
+            }
+
+            componentPositionalPattern.findAll(content).forEach {
+                val nodeId = it.groupValues[1]
+                if (nodeId !in nodeIds) {
+                    nodeIds.add(nodeId)
+                }
+            }
+
+            return nodeIds.distinct()
+        }
     }
 
     /**
