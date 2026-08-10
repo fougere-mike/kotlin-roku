@@ -1,6 +1,7 @@
 package com.example.roku.gradle
 
 import com.example.roku.gradle.tasks.CompileBrighterScriptTask
+import com.example.roku.gradle.tasks.CompileComponentsKlibTask
 import com.example.roku.gradle.tasks.CopyKotlinToBsTask
 import com.example.roku.gradle.tasks.DeleteRokuTask
 import com.example.roku.gradle.tasks.DeviceLogTask
@@ -167,14 +168,19 @@ class RokuPlugin : Plugin<Project> {
                 outputDirectory.set(project.layout.buildDirectory.dir("brs/brs/main/components"))
             }
 
-            // Test compilation mirrors the components wiring: it references main classes.
-            // compileComponentsKotlinBrs writes into brs/brs/main (the main classes dir this
-            // task consumes), so Gradle 8.14 implicit-dependency validation requires the
-            // explicit dependsOn.
+            // Test compilation mirrors the components wiring: it references main classes,
+            // and also component classes so test drivers can hold typed component handles
+            // (createComponent<T>() + @SG*Field property access). Component types come
+            // from the components klib — the .brs output dirs carry no compile-time
+            // metadata (-libraries only loads real klibs). compileComponentsKotlinBrs
+            // writes into brs/brs/main (the main classes dir this task consumes), so
+            // Gradle 8.14 implicit-dependency validation requires the explicit dependsOn.
             if (name == "compileTestKotlinBrs") {
                 dependsOn("compileKotlinBrs")
                 dependsOn("compileComponentsKotlinBrs")
+                dependsOn("compileComponentsKlibBrs")
                 libraries.from(project.layout.buildDirectory.dir("brs/brs/main/source"))
+                libraries.from(project.layout.buildDirectory.file("brs/klib/components.klib"))
             }
         }
 
@@ -263,6 +269,22 @@ class RokuPlugin : Plugin<Project> {
         // The stubs must exist before brsComponents compilation because user code
         // references MainScreen_Layout(top) which comes from the stubs.
         project.tasks.named("compileComponentsKotlinBrs") { dependsOn(generateLayoutStubsTask) }
+
+        // Serialize the components compilation to a klib so the brsTest driver can
+        // reference component classes with static types (createComponent<T>() +
+        // @SG*Field property access). Same sources as compileComponentsKotlinBrs
+        // (components dir + generated layout stubs); compile-time artifact only.
+        project.tasks.register("compileComponentsKlibBrs", CompileComponentsKlibTask::class.java).configure {
+            group = "brightscript"
+            description = "Serializes component classes to a klib for typed test-driver references"
+            dependsOn(generateLayoutStubsTask)
+            sourceFiles.from(extension.componentsDir)
+            sourceFiles.from(project.layout.buildDirectory.dir("generated/layout-stubs"))
+            compilerClasspath.from(brsCompilerConfig)
+            libraries.from(brsStdlibConfig)
+            moduleName.set("components")
+            outputKlib.set(project.layout.buildDirectory.file("brs/klib/components.klib"))
+        }
 
         // Add generated stubs to brsComponents source set so the compiler can resolve symbols.
         // Note: We use afterEvaluate and srcDir (not from()) to add to the source set configuration
