@@ -106,6 +106,40 @@ class ComponentIncludeValidatorTest {
         assertTrue(calls.contains("other"))
     }
 
+    @Test
+    fun `call through a function-pointer parameter is not a global call`() {
+        // The corpus shape: the stdlib's scope-binding dispatch invokes a lifted block
+        // through its `binding` parameter — a local shadows any global in call position.
+        val calls = ComponentIncludeValidator.extractCalls(
+            "function startBinding(binding as Dynamic, captures as Object)\n" +
+                "    result = binding(captures, completion)\n" +
+                "    other = realGlobal(1)\n" +
+                "    return result\n" +
+                "end function\n"
+        )
+        assertFalse(calls.contains("binding"))
+        assertTrue(calls.contains("realGlobal"))
+    }
+
+    @Test
+    fun `call through a locally assigned function value is not a global call`() {
+        val calls = ComponentIncludeValidator.extractCalls(
+            "function caller()\n" +
+                "    f = someGlobal_k_\n" +
+                "    return f(1)\n" +
+                "end function\n"
+        )
+        assertFalse(calls.contains("f"))
+    }
+
+    @Test
+    fun `calls outside any function body keep the plain scan`() {
+        // Definition-less snippets (and signature-line matches) have no locals in scope;
+        // behavior there is unchanged.
+        val calls = ComponentIncludeValidator.extractCalls("a = topLevelCall(1)\n")
+        assertTrue(calls.contains("topLevelCall"))
+    }
+
     // ---- extractBareRefs ----
 
     @Test

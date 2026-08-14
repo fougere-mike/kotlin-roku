@@ -21,10 +21,15 @@ import java.io.File
  * - A "call" is a bare identifier followed by `(`, not preceded by `.` or a word
  *   character. Dotted/member calls (`obj.foo(`) dispatch through the object and are
  *   intentionally ignored.
- * - A local variable holding a function value and invoked as `f()` is indistinguishable
- *   from a global call; if the name matches no definition anywhere it will be reported.
- *   The generated-code corpus does not use this pattern (invocation goes through
- *   `this.method()`), so in practice this does not produce noise.
+ * - A call whose name matches a per-body LOCAL (parameter, assignment target, loop/dim
+ *   target — the same flow-insensitive collection [extractBareRefs] uses) is excluded:
+ *   in BrightScript a local shadows any global in call position, so `f(...)` with a
+ *   local `f` is a dynamic function-pointer call that cannot be resolved statically.
+ *   The corpus instance is the stdlib's scope-binding dispatch
+ *   (`binding(captures, completion)` — a function-pointer parameter). Flip side, as
+ *   with references: a genuine global call in a body that ALSO assigns that name
+ *   locally is suppressed — acceptable, since mangled globals are never assigned.
+ *   Occurrences outside any function body keep the plain scan (no locals in scope).
  * - Anonymous functions (`function(x)`) are excluded via the keyword allowlist.
  *
  * Bare function-value references ([extractBareRefs]): a global function name used OUTSIDE
@@ -187,24 +192,37 @@ object ComponentIncludeValidator {
     fun extractDefinitions(strippedText: String): Set<String> =
         DEFINITION.findAll(strippedText).map { it.groupValues[1].lowercase() }.toSet()
 
-    /** Bare global calls in already-stripped text; original case preserved for reporting. */
-    fun extractCalls(strippedText: String): Set<String> =
-        BARE_CALL.findAll(strippedText).map { it.groupValues[1] }.toSet()
+    /**
+     * Bare global calls in already-stripped text; original case preserved for reporting.
+     *
+     * A call occurrence inside a function body whose per-body locals contain the callee
+     * name is excluded (function-pointer invocation — the local shadows any global in
+     * call position; see the class KDoc). Occurrences outside any body are kept as-is.
+     */
+    fun extractCalls(strippedText: String): Set<String> {
+        val bodies = scanBodies(strippedText)
+        val calls = mutableSetOf<String>()
+        for (match in BARE_CALL.findAll(strippedText)) {
+            val name = match.groupValues[1]
+            val body = bodies.firstOrNull { match.range.first in it.range }
+            if (body != null && name.lowercase() in body.localNames) continue
+            calls.add(name)
+        }
+        return calls
+    }
+
+    /** One function/sub body: its text range in the stripped file + its per-body local names. */
+    private class BodyScan(val range: IntRange, val localNames: Set<String>)
 
     /**
-     * Bare function-value references in already-stripped text; original case preserved.
-     *
-     * A reference is a bare identifier outside call position that either matches a name in
-     * [knownNames] (the lowercased definition index) or looks compiler-mangled. Definition
-     * lines, per-body locals, and receiver/index positions are excluded — see the class KDoc
-     * for the full heuristics and limits.
+     * Segments already-stripped text into definition bodies and collects each body's
+     * flow-insensitive local names (parameters of the definition and of anonymous
+     * functions within it, assignment targets, `for`/`for each`/`dim` targets).
+     * Shared by [extractCalls] (call-position shadowing) and [extractBareRefs].
      */
-    fun extractBareRefs(strippedText: String, knownNames: Set<String>): Set<String> {
-        val refs = mutableSetOf<String>()
+    private fun scanBodies(strippedText: String): List<BodyScan> {
         val definitionLines = DEFINITION_LINE.findAll(strippedText).toList()
-        for ((index, definition) in definitionLines.withIndex()) {
-            // Body runs to the next definition line: anonymous `end function`s can't truncate
-            // it, and the trailing `end function`/`end sub` keywords never match the lexicon.
+        return definitionLines.mapIndexed { index, definition ->
             val bodyStart = definition.range.last + 1
             val bodyEnd = definitionLines.getOrNull(index + 1)?.range?.first ?: strippedText.length
             val body = strippedText.substring(bodyStart, bodyEnd)
@@ -217,9 +235,27 @@ object ComponentIncludeValidator {
             ASSIGNMENT_TARGET.findAll(body).forEach { localNames.add(it.groupValues[1].lowercase()) }
             LOOP_OR_DIM_TARGET.findAll(body).forEach { localNames.add(it.groupValues[1].lowercase()) }
 
+            BodyScan(bodyStart until bodyEnd, localNames)
+        }
+    }
+
+    /**
+     * Bare function-value references in already-stripped text; original case preserved.
+     *
+     * A reference is a bare identifier outside call position that either matches a name in
+     * [knownNames] (the lowercased definition index) or looks compiler-mangled. Definition
+     * lines, per-body locals, and receiver/index positions are excluded — see the class KDoc
+     * for the full heuristics and limits.
+     */
+    fun extractBareRefs(strippedText: String, knownNames: Set<String>): Set<String> {
+        val refs = mutableSetOf<String>()
+        // Bodies run to the next definition line: anonymous `end function`s can't truncate
+        // them, and the trailing `end function`/`end sub` keywords never match the lexicon.
+        for (bodyScan in scanBodies(strippedText)) {
+            val body = strippedText.substring(bodyScan.range.first, bodyScan.range.last + 1)
             for (match in BARE_IDENTIFIER.findAll(body)) {
                 val name = match.groupValues[1]
-                if (name.lowercase() in localNames) continue
+                if (name.lowercase() in bodyScan.localNames) continue
                 if (name.lowercase() !in knownNames && !isCompilerMangled(name)) continue
                 val afterName = match.range.last + 1
                 if (afterName < body.length && (body[afterName] == '.' || body[afterName] == '[')) continue
