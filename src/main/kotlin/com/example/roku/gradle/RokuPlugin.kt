@@ -131,6 +131,32 @@ class RokuPlugin : Plugin<Project> {
             "com.nuvyyo:kotlin-stdlib-brs-runtime:$kotlinVersion"
         )
 
+        // Create a configuration for the BRS flow klib (compile-time). Flow ships as a
+        // default library alongside the stdlib: main, components, and test compilations
+        // all see kotlin.coroutines.flow without users declaring the dependency.
+        val brsFlowConfig = project.configurations.create("kotlinBrsFlow") {
+            isCanBeConsumed = false
+            isCanBeResolved = true
+        }
+
+        // Add the BRS flow klib dependency
+        project.dependencies.add(
+            "kotlinBrsFlow",
+            "com.nuvyyo:kotlin-flow-brs:$kotlinVersion"
+        )
+
+        // Create a configuration for the BRS flow runtime files (.brs files for packaging)
+        val brsFlowRuntimeConfig = project.configurations.create("kotlinBrsFlowRuntime") {
+            isCanBeConsumed = false
+            isCanBeResolved = true
+        }
+
+        // Add the BRS flow runtime JAR dependency (contains .brs files)
+        project.dependencies.add(
+            "kotlinBrsFlowRuntime",
+            "com.nuvyyo:kotlin-flow-brs-runtime:$kotlinVersion"
+        )
+
         // Create a configuration for the kotlin.test runtime files (.brs files for the TEST package).
         // Resolution is deferred until packageRokuTests actually runs, so the plugin applies and
         // configures cleanly even when the artifact is not yet in any repository.
@@ -157,6 +183,7 @@ class RokuPlugin : Plugin<Project> {
         project.tasks.withType(KotlinBrsCompile::class.java).configureEach {
             compilerJar.fileProvider(project.provider { brsCompilerConfig.singleFile })
             libraries.from(brsStdlibConfig)
+            libraries.from(brsFlowConfig)
 
             // Additional configuration for the components compile task
             if (name == "compileComponentsKotlinBrs") {
@@ -185,7 +212,7 @@ class RokuPlugin : Plugin<Project> {
         }
 
         // Register tasks
-        registerTasks(project, rokuExtension, rokuTestExtension, rokuValidationExtension, brsRuntimeConfig, brsTestRuntimeConfig, brsCompilerConfig, brsStdlibConfig)
+        registerTasks(project, rokuExtension, rokuTestExtension, rokuValidationExtension, brsRuntimeConfig, brsTestRuntimeConfig, brsCompilerConfig, brsStdlibConfig, brsFlowConfig, brsFlowRuntimeConfig)
 
         // Register hybrid build tasks if BrighterScript is enabled
         project.afterEvaluate {
@@ -203,7 +230,9 @@ class RokuPlugin : Plugin<Project> {
         brsRuntimeConfig: org.gradle.api.artifacts.Configuration,
         brsTestRuntimeConfig: org.gradle.api.artifacts.Configuration,
         brsCompilerConfig: org.gradle.api.artifacts.Configuration,
-        brsStdlibConfig: org.gradle.api.artifacts.Configuration
+        brsStdlibConfig: org.gradle.api.artifacts.Configuration,
+        brsFlowConfig: org.gradle.api.artifacts.Configuration,
+        brsFlowRuntimeConfig: org.gradle.api.artifacts.Configuration
     ) {
         // Load device config from local.properties / environment variables
         val localProps = loadLocalProperties(project)
@@ -225,6 +254,18 @@ class RokuPlugin : Plugin<Project> {
         // Stdlib BRS files provider (used by multiple tasks)
         val stdlibBrsFilesProvider = project.provider {
             val runtimeJar = brsRuntimeConfig.resolve().firstOrNull()
+            if (runtimeJar != null && runtimeJar.exists()) {
+                project.zipTree(runtimeJar)
+            } else {
+                project.files()
+            }
+        }
+
+        // Flow BRS runtime files provider — staged like the stdlib runtime (MAIN and
+        // TEST packages both): flow is a default library, so its .brs files must be
+        // packaged and indexed by the include validators wherever the stdlib's are.
+        val flowRuntimeBrsFilesProvider = project.provider {
+            val runtimeJar = brsFlowRuntimeConfig.resolve().firstOrNull()
             if (runtimeJar != null && runtimeJar.exists()) {
                 project.zipTree(runtimeJar)
             } else {
@@ -282,6 +323,7 @@ class RokuPlugin : Plugin<Project> {
             sourceFiles.from(project.layout.buildDirectory.dir("generated/layout-stubs"))
             compilerClasspath.from(brsCompilerConfig)
             libraries.from(brsStdlibConfig)
+            libraries.from(brsFlowConfig)
             moduleName.set("components")
             outputKlib.set(project.layout.buildDirectory.file("brs/klib/components.klib"))
         }
@@ -317,6 +359,7 @@ class RokuPlugin : Plugin<Project> {
                 // Compiler-generated XML with interface sections (for SceneGraph fields)
                 compilerGeneratedXmlDir.set(project.layout.buildDirectory.dir("brs/brs/main/components/components"))
                 stdlibBrsFiles.from(stdlibBrsFilesProvider)
+                stdlibBrsFiles.from(flowRuntimeBrsFilesProvider)
                 outputXmlDir.set(project.layout.buildDirectory.dir("roku/processedComponents"))
             }
         }
@@ -335,6 +378,7 @@ class RokuPlugin : Plugin<Project> {
                 compiledComponentsDir.set(compiledComponentsDirProvider)
                 stagedSourceDir.set(compiledMainSourceDir)
                 runtimeBrs.from(stdlibBrsFilesProvider)
+                runtimeBrs.from(flowRuntimeBrsFilesProvider)
                 mode.set(validationExtension.includeMode)
                 extraBuiltins.set(validationExtension.extraBuiltins)
                 reportFile.set(project.layout.buildDirectory.file("roku/validation/componentIncludes.txt"))
@@ -384,8 +428,9 @@ class RokuPlugin : Plugin<Project> {
                     }
                 )
 
-                // Include stdlib .brs runtime files from the resolved JAR
+                // Include stdlib .brs runtime files from the resolved JAR, plus the flow runtime
                 stdlibBrs.from(stdlibBrsFilesProvider)
+                stdlibBrs.from(flowRuntimeBrsFilesProvider)
             }
         }
 
@@ -454,6 +499,7 @@ class RokuPlugin : Plugin<Project> {
                 compiledComponentsDir.set(compiledComponentsDirProvider)
                 stagedSourceDir.set(stageTestSourceTask.flatMap { it.outputDir })
                 runtimeBrs.from(stdlibBrsFilesProvider)
+                runtimeBrs.from(flowRuntimeBrsFilesProvider)
                 runtimeBrs.from(testRuntimeBrsFilesProvider)
                 mode.set(validationExtension.includeMode)
                 extraBuiltins.set(validationExtension.extraBuiltins)
@@ -504,8 +550,10 @@ class RokuPlugin : Plugin<Project> {
                     }
                 )
 
-                // Include stdlib .brs runtime files plus the kotlin.test runtime (TEST package only)
+                // Include stdlib .brs runtime files plus the flow runtime, plus the
+                // kotlin.test runtime (TEST package only)
                 stdlibBrs.from(stdlibBrsFilesProvider)
+                stdlibBrs.from(flowRuntimeBrsFilesProvider)
                 stdlibBrs.from(testRuntimeBrsFilesProvider)
 
                 // The lazy provider above swallows resolution failures (see its comment).
