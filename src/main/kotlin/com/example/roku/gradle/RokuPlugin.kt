@@ -1,7 +1,7 @@
 package com.example.roku.gradle
 
 import com.example.roku.gradle.tasks.CompileBrighterScriptTask
-import com.example.roku.gradle.tasks.CompileComponentsKlibTask
+import com.example.roku.gradle.tasks.CompileKlibTask
 import com.example.roku.gradle.tasks.CopyKotlinToBsTask
 import com.example.roku.gradle.tasks.DeleteRokuTask
 import com.example.roku.gradle.tasks.DeviceLogTask
@@ -317,7 +317,7 @@ class RokuPlugin : Plugin<Project> {
         // reference component classes with static types (createComponent<T>() +
         // @SG*Field property access). Same sources as compileComponentsKotlinBrs
         // (components dir + generated layout stubs); compile-time artifact only.
-        project.tasks.register("compileComponentsKlibBrs", CompileComponentsKlibTask::class.java).configure {
+        project.tasks.register("compileComponentsKlibBrs", CompileKlibTask::class.java).configure {
             group = "brightscript"
             description = "Serializes component classes to a klib for typed test-driver references"
             dependsOn(generateLayoutStubsTask)
