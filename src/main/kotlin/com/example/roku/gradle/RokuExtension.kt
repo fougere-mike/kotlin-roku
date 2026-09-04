@@ -1,11 +1,18 @@
 package com.example.roku.gradle
 
+import org.gradle.api.Action
 import org.gradle.api.Project
 import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.provider.Property
 import javax.inject.Inject
 
+/**
+ * The `roku { }` block — the ONE configuration surface of a Roku app module,
+ * shaped like Android's `android { }`: app metadata, compilation options,
+ * project layout, device deployment, and the nested `test { }` / `validation { }`
+ * option groups.
+ */
 abstract class RokuExtension @Inject constructor(project: Project) {
     // App metadata
     abstract val appName: Property<String>
@@ -19,6 +26,7 @@ abstract class RokuExtension @Inject constructor(project: Project) {
     // Roku project structure
     abstract val manifestFile: RegularFileProperty
     abstract val imagesDir: DirectoryProperty
+
     /**
      * OPTIONAL directory of hand-written SceneGraph component XML files (default
      * `components/`). Kotlin components live in `src/brsMain/kotlin` like every other
@@ -37,6 +45,16 @@ abstract class RokuExtension @Inject constructor(project: Project) {
     abstract val brighterScriptStagingDir: DirectoryProperty
     abstract val brighterScriptCommand: Property<String>
     abstract val brighterScriptSourceDir: DirectoryProperty
+
+    /** Device-test options: `roku { test { timeout.set(300_000L) } }`. */
+    val test: RokuTestExtension = project.objects.newInstance(RokuTestExtension::class.java, project)
+
+    /** Include-closure validation options: `roku { validation { includeMode.set("strict") } }`. */
+    val validation: RokuValidationExtension = project.objects.newInstance(RokuValidationExtension::class.java)
+
+    fun test(action: Action<in RokuTestExtension>) = action.execute(test)
+
+    fun validation(action: Action<in RokuValidationExtension>) = action.execute(validation)
 
     init {
         appName.convention(project.name)

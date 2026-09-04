@@ -48,19 +48,6 @@ class RokuPlugin : Plugin<Project> {
             project
         )
 
-        // Create Roku test extension
-        val rokuTestExtension = project.extensions.create(
-            "rokuTest",
-            RokuTestExtension::class.java,
-            project
-        )
-
-        // Create Roku validation extension
-        val rokuValidationExtension = project.extensions.create(
-            "rokuValidation",
-            RokuValidationExtension::class.java
-        )
-
         // Configure BRS target immediately after plugin apply
         val kotlinExt = project.extensions.getByType(KotlinMultiplatformExtension::class.java)
 
@@ -198,7 +185,7 @@ class RokuPlugin : Plugin<Project> {
         }
 
         // Register tasks
-        registerTasks(project, rokuExtension, rokuTestExtension, rokuValidationExtension, brsRuntimeConfig, brsTestRuntimeConfig, brsCompilerConfig, brsStdlibConfig, brsFlowConfig, brsFlowRuntimeConfig)
+        registerTasks(project, rokuExtension, rokuExtension.test, rokuExtension.validation, brsRuntimeConfig, brsTestRuntimeConfig, brsCompilerConfig, brsStdlibConfig, brsFlowConfig, brsFlowRuntimeConfig)
 
         // Register hybrid build tasks if BrighterScript is enabled
         project.afterEvaluate {
