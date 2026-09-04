@@ -115,9 +115,6 @@ class RokuPlugin : Plugin<Project> {
             "com.nuvyyo:kotlin-stdlib-brs:$kotlinVersion"
         )
 
-        // Register IDE import for BRS source sets
-        // This allows IntelliJ to properly index Kotlin files targeting BrightScript
-        registerIdeImport(project, brsStdlibConfig, kotlinVersion.toString())
 
         // Create a configuration for the BRS stdlib runtime files (.brs files for packaging)
         val brsRuntimeConfig = project.configurations.create("kotlinBrsRuntime") {
@@ -144,6 +141,11 @@ class RokuPlugin : Plugin<Project> {
             "kotlinBrsFlow",
             "com.nuvyyo:kotlin-flow-brs:$kotlinVersion"
         )
+
+        // Register IDE import for BRS source sets. Declared after the flow configuration
+        // exists so both default klibs can be surfaced to IntelliJ, matching the set the
+        // compile tasks get via libraries.from(...).
+        registerIdeImport(project, brsStdlibConfig, brsFlowConfig, kotlinVersion.toString())
 
         // Create a configuration for the BRS flow runtime files (.brs files for packaging)
         val brsFlowRuntimeConfig = project.configurations.create("kotlinBrsFlowRuntime") {
@@ -840,7 +842,7 @@ class RokuPlugin : Plugin<Project> {
      * by providing the BRS stdlib as a resolvable dependency during Gradle sync.
      */
     @OptIn(ExternalKotlinTargetApi::class)
-    private fun registerIdeImport(project: Project, brsStdlibConfig: Configuration, kotlinVersion: String) {
+    private fun registerIdeImport(project: Project, brsStdlibConfig: Configuration, brsFlowConfig: Configuration, kotlinVersion: String) {
         val ideImport = IdeMultiplatformImport.instance(project)
 
         println("[RokuPlugin] Registering BRS IDE import resolver")
@@ -848,7 +850,13 @@ class RokuPlugin : Plugin<Project> {
         // Register a dependency resolver for BRS source sets
         // We identify BRS source sets by their naming convention (brsMain, brsTest, etc.)
         ideImport.registerDependencyResolver(
-            resolver = BrsStdlibIdeDependencyResolver(brsStdlibConfig, kotlinVersion),
+            resolver = BrsKlibIdeDependencyResolver(
+                klibs = listOf(
+                    BrsKlibIdeDependencyResolver.Entry(brsStdlibConfig, "kotlin-stdlib-brs", isStdlib = true),
+                    BrsKlibIdeDependencyResolver.Entry(brsFlowConfig, "kotlin-flow-brs", isStdlib = false),
+                ),
+                kotlinVersion = kotlinVersion,
+            ),
             constraint = IdeMultiplatformImport.SourceSetConstraint { sourceSet ->
                 val matches = sourceSet.name.startsWith("brs") || sourceSet.name.contains("Brs")
                 println("[RokuPlugin] Checking constraint for sourceSet: ${sourceSet.name}, matches: $matches")
@@ -862,43 +870,55 @@ class RokuPlugin : Plugin<Project> {
 
 /**
  * IDE dependency resolver for BRS source sets.
- * Returns the BRS stdlib klib as an IDE dependency so IntelliJ can resolve
- * symbols from kotlin-stdlib-brs during indexing.
  *
- * This implementation is modeled after IdeNativeStdlibDependencyResolver to ensure
- * proper klib metadata is provided for IDE navigation.
+ * Returns the BRS default klibs (stdlib and flow) as IDE dependencies so IntelliJ can
+ * resolve their symbols during indexing. The compile tasks pick these up via
+ * `libraries.from(...)`; the IDE has no view of a task classpath, so every klib that
+ * compilation treats as a default library has to be surfaced here as well - otherwise it
+ * compiles fine but shows up unresolved in the editor.
+ *
+ * Modeled after IdeNativeStdlibDependencyResolver so the klib metadata the IDE needs for
+ * navigation is provided.
  */
 @OptIn(ExternalKotlinTargetApi::class)
-internal class BrsStdlibIdeDependencyResolver(
-    private val stdlibConfig: Configuration,
+internal class BrsKlibIdeDependencyResolver(
+    private val klibs: List<Entry>,
     private val kotlinVersion: String
 ) : IdeDependencyResolver {
+
+    /** A default klib to expose: where to resolve it, its Maven module, and whether it is the stdlib. */
+    internal data class Entry(
+        val configuration: Configuration,
+        val module: String,
+        val isStdlib: Boolean,
+    )
+
     override fun resolve(sourceSet: KotlinSourceSet): Set<IdeaKotlinDependency> {
-        println("[BrsStdlibIdeDependencyResolver] Resolving dependencies for sourceSet: ${sourceSet.name}")
-        val stdlibFiles = stdlibConfig.resolve()
-        println("[BrsStdlibIdeDependencyResolver] Resolved ${stdlibFiles.size} files: ${stdlibFiles.map { it.name }}")
-        if (stdlibFiles.isEmpty()) return emptySet()
+        println("[BrsKlibIdeDependencyResolver] Resolving dependencies for sourceSet: ${sourceSet.name}")
+        return klibs.mapNotNullTo(LinkedHashSet()) { resolveKlib(it) }
+    }
 
-        // Find the klib file
-        val stdlibFile = stdlibFiles.firstOrNull { it.extension == "klib" } ?: stdlibFiles.firstOrNull() ?: return emptySet()
-        println("[BrsStdlibIdeDependencyResolver] Using stdlib file: ${stdlibFile.absolutePath}")
+    private fun resolveKlib(entry: Entry): IdeaKotlinDependency? {
+        val files = entry.configuration.resolve()
+        println("[BrsKlibIdeDependencyResolver] ${entry.module}: resolved ${files.size} file(s): ${files.map { it.name }}")
+        if (files.isEmpty()) return null
 
-        // Try to find sources jar in the same directory
-        val sourcesJar = findSourcesJar(stdlibFile)
+        val klibFile = files.firstOrNull { it.extension == "klib" } ?: files.firstOrNull() ?: return null
+        println("[BrsKlibIdeDependencyResolver] ${entry.module}: using ${klibFile.absolutePath}")
+
+        val sourcesJar = findSourcesJar(klibFile)
         if (sourcesJar != null) {
-            println("[BrsStdlibIdeDependencyResolver] Found sources jar: ${sourcesJar.absolutePath}")
+            println("[BrsKlibIdeDependencyResolver] ${entry.module}: found sources jar ${sourcesJar.absolutePath}")
         }
 
-        // Try to read klib metadata directly from the klib file
         val klibExtraData = try {
-            readKlibMetadata(stdlibFile)
+            readKlibMetadata(klibFile, entry.module)
         } catch (error: Throwable) {
-            println("[BrsStdlibIdeDependencyResolver] Failed to read klib metadata: ${error.message}")
-            // Fallback to minimal metadata
+            println("[BrsKlibIdeDependencyResolver] ${entry.module}: failed to read klib metadata: ${error.message}")
             KlibExtra(
                 builtInsPlatform = null,
-                uniqueName = "kotlin-stdlib-brs",
-                shortName = "stdlib",
+                uniqueName = entry.module,
+                shortName = null,
                 packageFqName = null,
                 nativeTargets = null,
                 commonizerNativeTargets = null,
@@ -907,26 +927,26 @@ internal class BrsStdlibIdeDependencyResolver(
             )
         }
 
-        return setOf(
-            IdeaKotlinResolvedBinaryDependency(
-                binaryType = IdeaKotlinBinaryDependency.KOTLIN_COMPILE_BINARY_TYPE,
-                classpath = IdeaKotlinClasspath(stdlibFile),
-                coordinates = brsStdlibCoordinates()
-            ).apply {
-                // Set the klib extra metadata for proper IDE indexing
-                this.klibExtra = klibExtraData
+        return IdeaKotlinResolvedBinaryDependency(
+            binaryType = IdeaKotlinBinaryDependency.KOTLIN_COMPILE_BINARY_TYPE,
+            classpath = IdeaKotlinClasspath(klibFile),
+            coordinates = brsKlibCoordinates(entry.module)
+        ).apply {
+            // Set the klib extra metadata for proper IDE indexing
+            this.klibExtra = klibExtraData
 
-                // Mark as native distribution/stdlib for IDE compatibility
-                // This helps IntelliJ's Kotlin plugin recognize and index the klib
-                this.isNativeDistribution = true
-                this.isNativeStdlib = true
+            // BRS klibs use the Native klib format, so the IDE indexes them through the
+            // Native path. Only the stdlib may claim isNativeStdlib: the BRS builtins
+            // module is built from whichever dependency claims it, so marking flow as a
+            // stdlib too would give it two competing roots.
+            this.isNativeDistribution = true
+            this.isNativeStdlib = entry.isStdlib
 
-                // Add sources for IDE navigation
-                if (sourcesJar != null) {
-                    this.sourcesClasspath += sourcesJar
-                }
+            // Add sources for IDE navigation
+            if (sourcesJar != null) {
+                this.sourcesClasspath += sourcesJar
             }
-        )
+        }
     }
 
     /**
@@ -946,7 +966,7 @@ internal class BrsStdlibIdeDependencyResolver(
      * Read klib metadata directly from the klib file.
      * A klib is a zip file containing a manifest with library properties.
      */
-    private fun readKlibMetadata(klibFile: java.io.File): KlibExtra {
+    private fun readKlibMetadata(klibFile: java.io.File, fallbackUniqueName: String): KlibExtra {
         val properties = java.util.Properties()
 
         ZipFile(klibFile).use { zip ->
@@ -959,11 +979,11 @@ internal class BrsStdlibIdeDependencyResolver(
             }
         }
 
-        val uniqueName = properties.getProperty("unique_name") ?: "kotlin-stdlib-brs"
+        val uniqueName = properties.getProperty("unique_name") ?: fallbackUniqueName
         val shortName = properties.getProperty("short_name")
         val builtInsPlatform = properties.getProperty("builtins_platform")
 
-        println("[BrsStdlibIdeDependencyResolver] Read klib metadata: uniqueName=$uniqueName, shortName=$shortName, builtInsPlatform=$builtInsPlatform")
+        println("[BrsKlibIdeDependencyResolver] Read klib metadata: uniqueName=$uniqueName, shortName=$shortName, builtInsPlatform=$builtInsPlatform")
 
         return KlibExtra(
             builtInsPlatform = builtInsPlatform,
@@ -978,12 +998,12 @@ internal class BrsStdlibIdeDependencyResolver(
     }
 
     /**
-     * Provide coordinates for the BRS stdlib dependency.
+     * Provide coordinates for a BRS default klib dependency.
      */
-    private fun brsStdlibCoordinates(): IdeaKotlinBinaryCoordinates {
+    private fun brsKlibCoordinates(module: String): IdeaKotlinBinaryCoordinates {
         return IdeaKotlinBinaryCoordinates(
             group = "com.nuvyyo",
-            module = "kotlin-stdlib-brs",
+            module = module,
             version = kotlinVersion
         )
     }
