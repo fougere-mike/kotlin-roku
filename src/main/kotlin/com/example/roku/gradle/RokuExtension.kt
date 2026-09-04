@@ -19,6 +19,11 @@ abstract class RokuExtension @Inject constructor(project: Project) {
     // Roku project structure
     abstract val manifestFile: RegularFileProperty
     abstract val imagesDir: DirectoryProperty
+    /**
+     * OPTIONAL directory of hand-written SceneGraph component XML files (default
+     * `components/`). Kotlin components live in `src/brsMain/kotlin` like every other
+     * class — the compiler generates their XML. Most projects never create this dir.
+     */
     abstract val componentsDir: DirectoryProperty
     abstract val fontsDir: DirectoryProperty
     abstract val assetsDir: DirectoryProperty

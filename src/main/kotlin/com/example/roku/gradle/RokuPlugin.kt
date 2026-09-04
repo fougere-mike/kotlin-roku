@@ -33,7 +33,6 @@ import org.jetbrains.kotlin.gradle.plugin.KotlinSourceSet
 import org.jetbrains.kotlin.gradle.plugin.ide.IdeDependencyResolver
 import org.jetbrains.kotlin.gradle.plugin.ide.IdeMultiplatformImport
 import org.jetbrains.kotlin.gradle.targets.brs.KotlinBrsCompile
-import org.jetbrains.kotlin.gradle.targets.brs.KotlinBrsIrTarget
 import java.util.Properties
 import java.util.zip.ZipFile
 
@@ -68,19 +67,18 @@ class RokuPlugin : Plugin<Project> {
         // Apply BRS target
         kotlinExt.brs()
 
-        // Create the components compilation for SceneGraph component Kotlin files
-        val brsTarget = kotlinExt.targets.getByName("brs") as KotlinBrsIrTarget
-        val componentsCompilation = brsTarget.compilations.create("components")
-
-        // Configure brsComponents source set to use components/ directory
-        val brsComponentsSourceSet = componentsCompilation.defaultSourceSet
-        brsComponentsSourceSet.kotlin.srcDir(rokuExtension.componentsDir)
-
-        // Share symbols (including internal) between brsComponents and brsMain via the
-        // canonical KMP associateWith mechanism. dependsOn into the main compilation's default
-        // source set triggers KotlinSourceSetDependsOnDefaultCompilationSourceSet and
-        // KotlinDefaultHierarchyFallbackDependsOnUsageDetected warnings.
-        componentsCompilation.associateWith(brsTarget.compilations.getByName("main"))
+        // ONE compilation per source set. SceneGraph components are ordinary brsMain
+        // classes: the compiler routes each detected component's output to
+        // components/<Name>/ and everything else to source/, so no second compilation
+        // is needed — and a second one would make brsMain symbols unresolvable from
+        // component code (-libraries loads klibs, not .brs output dirs) and mark its
+        // source set as TEST in the IDE (associateWith => isTestCompilation).
+        //
+        // Generated @SGLayout accessor stubs are part of brsMain; the generating task is
+        // registered in registerTasks and compileKotlinBrs depends on it there.
+        kotlinExt.sourceSets.named("brsMain") {
+            kotlin.srcDir(project.layout.buildDirectory.dir("generated/layout-stubs"))
+        }
 
         // Create a configuration to resolve the BRS compiler JAR
         val brsCompilerConfig = project.configurations.create("brsCompiler") {
@@ -181,35 +179,21 @@ class RokuPlugin : Plugin<Project> {
             }
         }
 
-        // Configure all BRS compile tasks with the compiler JAR and stdlib
+        // Configure all BRS compile tasks with the compiler JAR and the default klibs
         project.tasks.withType(KotlinBrsCompile::class.java).configureEach {
             compilerJar.fileProvider(project.provider { brsCompilerConfig.singleFile })
             libraries.from(brsStdlibConfig)
             libraries.from(brsFlowConfig)
 
-            // Additional configuration for the components compile task
-            if (name == "compileComponentsKotlinBrs") {
-                // Components depend on main compilation output
-                dependsOn("compileKotlinBrs")
-                // Add main compiled output as library so components can reference main classes
-                libraries.from(project.layout.buildDirectory.dir("brs/brs/main/source"))
-                // Output to same location as before for packaging compatibility
-                outputDirectory.set(project.layout.buildDirectory.dir("brs/brs/main/components"))
-            }
-
-            // Test compilation mirrors the components wiring: it references main classes,
-            // and also component classes so test drivers can hold typed component handles
-            // (createComponent<T>() + @SG*Field property access). Component types come
-            // from the components klib — the .brs output dirs carry no compile-time
-            // metadata (-libraries only loads real klibs). compileComponentsKotlinBrs
-            // writes into brs/brs/main (the main classes dir this task consumes), so
-            // Gradle 8.14 implicit-dependency validation requires the explicit dependsOn.
+            // The test compilation references main classes — components included — with
+            // static types (createComponent<T>() + @SG*Field property access) through the
+            // main klib. The .brs output dirs carry no compile-time metadata (-libraries
+            // only loads real klibs), so main.klib is the only route. compileKotlinBrs is
+            // an explicit dependency because stageRokuTestSource consumes its output too.
             if (name == "compileTestKotlinBrs") {
                 dependsOn("compileKotlinBrs")
-                dependsOn("compileComponentsKotlinBrs")
-                dependsOn("compileComponentsKlibBrs")
-                libraries.from(project.layout.buildDirectory.dir("brs/brs/main/source"))
-                libraries.from(project.layout.buildDirectory.file("brs/klib/components.klib"))
+                dependsOn("compileMainKlibBrs")
+                libraries.from(project.layout.buildDirectory.file("brs/klib/main.klib"))
             }
         }
 
@@ -293,53 +277,46 @@ class RokuPlugin : Plugin<Project> {
             }
         }
 
-        // Generate Layout stubs for IDE support
-        // This task parses @SGLayout annotations and generates stub .kt files
-        // that provide code completion without relying on the FIR plugin.
-        //
-        // IMPORTANT: We use extension.componentsDir directly as input (not the brsComponents source set)
-        // to avoid circular dependencies. The stubs are added to brsMain, not brsComponents.
+        // brsMain's CHECKED-IN source roots: every srcDir outside the build dir. The stub
+        // generator and the klib serializer read these rather than the source set's full
+        // sourceDirectories, which include the generated stub dir itself — a task must not
+        // read its own output.
+        val kotlinExt = project.extensions.getByType(KotlinMultiplatformExtension::class.java)
+        val buildDir = project.layout.buildDirectory.get().asFile.canonicalFile
+        val brsMainCheckedInSources = project.provider {
+            kotlinExt.sourceSets.getByName("brsMain").kotlin.srcDirs
+                .filter { !it.canonicalFile.startsWith(buildDir) }
+        }
+        val layoutStubsDir = project.layout.buildDirectory.dir("generated/layout-stubs")
+
+        // Generate @SGLayout accessor stubs (<ClassName>_Layout) for IDE support and
+        // compilation. Output is a brsMain srcDir (added in apply()).
         val generateLayoutStubsTask = project.tasks.register("generateLayoutStubs", GenerateLayoutStubsTask::class.java).apply {
             configure {
-                // Use the components directory directly to avoid circular dependency
-                // (brsComponents source set includes the stub output dir)
-                sourceFiles.from(extension.componentsDir)
-                stubOutputDir.set(project.layout.buildDirectory.dir("generated/layout-stubs"))
+                sourceFiles.from(brsMainCheckedInSources)
+                stubOutputDir.set(layoutStubsDir)
             }
         }
+        // brsMain sources include the stub dir, so compilation must wait for generation.
+        project.tasks.named("compileKotlinBrs") { dependsOn(generateLayoutStubsTask) }
 
-        // Make components compile task depend on stub generation
-        // The stubs must exist before brsComponents compilation because user code
-        // references MainScreen_Layout(top) which comes from the stubs.
-        project.tasks.named("compileComponentsKotlinBrs") { dependsOn(generateLayoutStubsTask) }
-
-        // Serialize the components compilation to a klib so the brsTest driver can
-        // reference component classes with static types (createComponent<T>() +
-        // @SG*Field property access). Same sources as compileComponentsKotlinBrs
-        // (components dir + generated layout stubs); compile-time artifact only.
-        project.tasks.register("compileComponentsKlibBrs", CompileKlibTask::class.java).configure {
+        // Serialize brsMain (components included) to a klib so the brsTest driver can
+        // reference main classes with static types. Compile-time artifact only.
+        project.tasks.register("compileMainKlibBrs", CompileKlibTask::class.java).configure {
             group = "brightscript"
-            description = "Serializes component classes to a klib for typed test-driver references"
+            description = "Serializes brsMain to a klib for typed test-driver references"
             dependsOn(generateLayoutStubsTask)
-            sourceFiles.from(extension.componentsDir)
-            sourceFiles.from(project.layout.buildDirectory.dir("generated/layout-stubs"))
+            sourceFiles.from(brsMainCheckedInSources)
+            sourceFiles.from(layoutStubsDir)
             compilerClasspath.from(brsCompilerConfig)
             libraries.from(brsStdlibConfig)
             libraries.from(brsFlowConfig)
-            moduleName.set("components")
-            outputKlib.set(project.layout.buildDirectory.file("brs/klib/components.klib"))
+            moduleName.set("main")
+            outputKlib.set(project.layout.buildDirectory.file("brs/klib/main.klib"))
         }
 
-        // Add generated stubs to brsComponents source set so the compiler can resolve symbols.
-        // Note: We use afterEvaluate and srcDir (not from()) to add to the source set configuration
-        // without creating a task dependency cycle.
-        project.afterEvaluate {
-            val kotlinExt = project.extensions.getByType(KotlinMultiplatformExtension::class.java)
-            val brsComponentsSourceSet = kotlinExt.sourceSets.findByName("brsComponents")
-            brsComponentsSourceSet?.kotlin?.srcDir(project.layout.buildDirectory.dir("generated/layout-stubs"))
-        }
-
-        // Compiled components directory
+        // Compiled components directory: the single compilation writes
+        // components/<Name>/{<Name>.xml, <Name>.deps.json, <Name>Kt.brs} here (flat layout)
         val compiledComponentsDirProvider = project.layout.buildDirectory.dir("brs/brs/main/components")
 
         // Compiled main source directory (for dependency tracking)
@@ -351,15 +328,14 @@ class RokuPlugin : Plugin<Project> {
                 group = "roku"
                 description = "Process component XML files to inject script imports"
 
-                // Must run after both compile tasks
+                // Must run after compilation
                 dependsOn("compileKotlinBrs")
-                dependsOn("compileComponentsKotlinBrs")
 
                 sourceXmlDir.set(extension.componentsDir)
                 compiledComponentsDir.set(compiledComponentsDirProvider)
                 compiledMainSource.set(compiledMainSourceDir)
                 // Compiler-generated XML with interface sections (for SceneGraph fields)
-                compilerGeneratedXmlDir.set(project.layout.buildDirectory.dir("brs/brs/main/components/components"))
+                compilerGeneratedXmlDir.set(compiledComponentsDirProvider)
                 stdlibBrsFiles.from(stdlibBrsFilesProvider)
                 stdlibBrsFiles.from(flowRuntimeBrsFilesProvider)
                 outputXmlDir.set(project.layout.buildDirectory.dir("roku/processedComponents"))
@@ -373,7 +349,6 @@ class RokuPlugin : Plugin<Project> {
                 description = "Validate that every packaged component's <script> list covers all calls its scripts make"
 
                 dependsOn("compileKotlinBrs")
-                dependsOn("compileComponentsKotlinBrs")
                 dependsOn(processComponentXmlTask)
 
                 processedXmlDir.set(processComponentXmlTask.flatMap { it.outputXmlDir })
@@ -393,9 +368,8 @@ class RokuPlugin : Plugin<Project> {
                 group = "roku"
                 description = "Package Roku app as .zip"
 
-                // Depend on all compile tasks and XML processing
+                // Depend on compilation and XML processing
                 dependsOn("compileKotlinBrs")
-                dependsOn("compileComponentsKotlinBrs")
                 dependsOn(processComponentXmlTask)
                 dependsOn(validateIncludesTask)
 
@@ -494,7 +468,6 @@ class RokuPlugin : Plugin<Project> {
                 description = "Validate component <script> includes against the Roku TEST package payload"
 
                 dependsOn(stageTestSourceTask)
-                dependsOn("compileComponentsKotlinBrs")
                 dependsOn(processComponentXmlTask)
 
                 processedXmlDir.set(processComponentXmlTask.flatMap { it.outputXmlDir })
@@ -516,7 +489,6 @@ class RokuPlugin : Plugin<Project> {
                 description = "Package Roku test app as .zip"
 
                 dependsOn(stageTestSourceTask)
-                dependsOn("compileComponentsKotlinBrs")
                 dependsOn(processComponentXmlTask)
                 dependsOn(validateTestIncludesTask)
 
@@ -627,8 +599,6 @@ class RokuPlugin : Plugin<Project> {
      * The task graph is SEQUENTIAL to allow BSC to see Kotlin-generated functions:
      *   compileKotlinBrs
      *           ↓
-     *   compileComponentsKotlinBrs
-     *           ↓
      *   copyKotlinToBrighterScript (copies .brs files to src/kotlin-generated/)
      *           ↓
      *   compileBrighterScript (now sees Kotlin functions - no lint errors!)
@@ -665,7 +635,6 @@ class RokuPlugin : Plugin<Project> {
 
                 // Wait for Kotlin compilation to finish
                 dependsOn("compileKotlinBrs")
-                dependsOn("compileComponentsKotlinBrs")
 
                 kotlinBrsSource.set(project.layout.buildDirectory.dir("brs/brs/main/source"))
                 // Copy to source/kotlin/ subdirectory to ensure BSC includes them in the main source scope
