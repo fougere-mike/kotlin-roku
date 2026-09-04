@@ -137,4 +137,33 @@ class ValidateComponentIncludesTaskTest {
         val report = File(tmp.root, "report.txt").readText()
         assertEquals(false, report.contains("doHelp"))
     }
+
+    @Test
+    fun `compiler-generated xml at the flat compiled path is discovered`() {
+        // One compilation: compiler XML lives at <compiled>/<Name>/<Name>.xml, no extra
+        // components/ level. A clean flat package must pass strict mode (not "zero components").
+        write("staged/FillerKt.brs", fillerDefinitions())
+        write("compiled/Widget/WidgetKt.brs", "sub Widget_init()\nend sub\n")
+        write(
+            "compiled/Widget/Widget.xml",
+            "<component name=\"Widget\" extends=\"Group\">\n" +
+                "  <script type=\"text/brightscript\" uri=\"pkg:/components/Widget/WidgetKt.brs\" />\n" +
+                "</component>\n"
+        )
+        write("processed/.keep", "")
+        val project = ProjectBuilder.builder().withProjectDir(tmp.root).build()
+        val task = project.tasks
+            .register("validateComponentIncludesFlat", ValidateComponentIncludesTask::class.java)
+            .get()
+        task.processedXmlDir.set(File(tmp.root, "processed"))
+        task.compiledComponentsDir.set(File(tmp.root, "compiled"))
+        task.stagedSourceDir.set(File(tmp.root, "staged"))
+        task.mode.set("strict")
+        task.extraBuiltins.set(emptySet())
+        task.reportFile.set(File(tmp.root, "report.txt"))
+
+        task.validate()
+
+        assertTrue(File(tmp.root, "report.txt").readText().contains("0 finding(s)"))
+    }
 }

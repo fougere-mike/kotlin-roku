@@ -88,7 +88,8 @@ abstract class ValidateComponentIncludesTask : DefaultTask() {
             ?.filter { it.isFile && it.extension == "brs" }?.toList().orEmpty()
 
         // Packaged component XMLs: processed user XMLs win; compiler-generated XMLs
-        // (components/<Name>/<Name>.xml) fill in the rest — mirrors PackageRokuTask.
+        // (<compiled>/<Name>/<Name>.xml — the flat single-compilation layout) fill in
+        // the rest — mirrors PackageRokuTask.
         val components = mutableListOf<ComponentScripts>()
         val userXmlNames = mutableSetOf<String>()
         processedXmlDir.asFile.orNull?.takeIf { it.isDirectory }?.walkTopDown()
@@ -103,7 +104,7 @@ abstract class ValidateComponentIncludesTask : DefaultTask() {
                     )
                 )
             }
-        compiledDir?.resolve("components")?.takeIf { it.isDirectory }?.walkTopDown()
+        compiledDir?.walkTopDown()
             ?.filter { it.isFile && it.extension == "xml" }
             ?.filter { it.nameWithoutExtension.lowercase() !in userXmlNames }
             ?.forEach { xml ->

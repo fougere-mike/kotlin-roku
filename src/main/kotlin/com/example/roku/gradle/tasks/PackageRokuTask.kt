@@ -138,9 +138,10 @@ abstract class PackageRokuTask : DefaultTask() {
                         }
                 }
 
-                // Add compiler-generated XMLs (from components/components/ subdirectory)
-                // These are for @Component classes that don't have user-authored XML files
-                val compilerXmlDir = File(componentsDir, "components")
+                // Add compiler-generated XMLs. One compilation writes them directly as
+                // <compiledComponents>/<Name>/<Name>.xml (flat layout). These are for
+                // component classes that don't have user-authored XML files.
+                val compilerXmlDir = componentsDir
                 if (compilerXmlDir.exists()) {
                     compilerXmlDir.walkTopDown()
                         .filter { it.isFile && it.extension == "xml" }

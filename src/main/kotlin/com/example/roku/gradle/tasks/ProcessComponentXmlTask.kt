@@ -92,7 +92,13 @@ abstract class ProcessComponentXmlTask : DefaultTask() {
         val runtimeFunctions: List<String>
     )
 
-    @get:InputDirectory
+    /**
+     * Hand-written SceneGraph component XML (roku.componentsDir). OPTIONAL: most
+     * projects have none — components are Kotlin classes whose XML the compiler
+     * generates. Declared as @InputFiles so a missing directory is an empty input,
+     * not a validation failure (ValidateComponentIncludesTask precedent).
+     */
+    @get:InputFiles
     @get:PathSensitive(PathSensitivity.RELATIVE)
     abstract val sourceXmlDir: DirectoryProperty
 

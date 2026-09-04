@@ -3,6 +3,7 @@ package com.example.roku.gradle.tasks
 import org.gradle.api.GradleException
 import org.gradle.testfixtures.ProjectBuilder
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -83,5 +84,25 @@ class PackageRokuTaskTest {
         }
         assertNotNull("case-differing duplicate must still fail", e)
         assertTrue(e!!.message!!.contains(fromRuntimeJar.absolutePath))
+    }
+
+    @Test
+    fun `flat compiled layout packages compiler xml and brs alongside under components`() {
+        // One compilation: the compiler writes <compiledComponents>/<Name>/<Name>.xml + <Name>Kt.brs
+        write("compiledComponents/Widget/Widget.xml", "<component name=\"Widget\" extends=\"Group\"/>\n")
+        write("compiledComponents/Widget/WidgetKt.brs", "sub Widget_init()\nend sub\n")
+        write("compiledComponents/Widget/Widget_LayoutKt.brs", "function Widget_Layout()\nend function\n")
+        val task = makeTask()
+        task.compiledComponents.set(File(tmp.root, "compiledComponents"))
+        task.processedXmlDir.set(File(tmp.root, "processed-empty").also { it.mkdirs() })
+
+        task.packageApp()
+
+        ZipFile(File(tmp.root, "out/app.zip")).use { zip ->
+            assertNotNull("compiler-generated XML must ship", zip.getEntry("components/Widget/Widget.xml"))
+            assertNotNull("component brs sits beside its XML", zip.getEntry("components/Widget/WidgetKt.brs"))
+            assertNotNull("layout brs sits beside its XML", zip.getEntry("components/Widget/Widget_LayoutKt.brs"))
+            assertNull("no stray root-level copy", zip.getEntry("components/WidgetKt.brs"))
+        }
     }
 }
