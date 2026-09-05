@@ -110,6 +110,8 @@ object ComponentIncludeValidator {
     private val BARE_CALL = Regex("(?<![.\\w])([A-Za-z_][A-Za-z0-9_]*)\\s*\\(")
     private val XML_COMMENT = Regex("<!--.*?-->", RegexOption.DOT_MATCHES_ALL)
     private val SCRIPT_URI = Regex("<script\\b[^>]*\\buri\\s*=\\s*\"([^\"]+)\"")
+    private val COMPONENT_TAG = Regex("<component\\b[^>]*>")
+    private val EXTENDS_ATTR = Regex("extends\\s*=\\s*\"([^\"]+)\"")
 
     // Reference-scan regexes ([extractBareRefs]). DEFINITION_LINE additionally captures the
     // rest of the signature line (parameter list) for local-name collection.
@@ -133,11 +135,17 @@ object ComponentIncludeValidator {
     private fun isCompilerMangled(name: String): Boolean =
         name.endsWith("_k_", ignoreCase = true) || name.startsWith("__kotlin_", ignoreCase = true)
 
-    /** A packaged component XML and the script URIs it lists. */
+    /**
+     * A packaged component XML, the script URIs it lists, and the component it `extends`
+     * (null when the XML declares none). [extends] names either another packaged component
+     * — whose scripts are then in scope for this one, see [validate] — or a SceneGraph
+     * built-in (`Group`, `Scene`, `Task`, ...), which ends the chain.
+     */
     data class ComponentScripts(
         val name: String,
         val xmlDisplayPath: String,
         val scriptUris: List<String>,
+        val extends: String? = null,
     )
 
     data class Finding(
@@ -273,12 +281,32 @@ object ComponentIncludeValidator {
         SCRIPT_URI.findAll(XML_COMMENT.replace(xmlContent, "")).map { it.groupValues[1] }.toList()
 
     /**
+     * The `extends` value of a component XML's `<component>` tag (XML comments ignored), or
+     * null when the tag or the attribute is absent. Feeds the extends-chain walk in [validate].
+     */
+    fun parseExtends(xmlContent: String): String? {
+        val tag = COMPONENT_TAG.find(XML_COMMENT.replace(xmlContent, ""))?.value ?: return null
+        return EXTENDS_ATTR.find(tag)?.groupValues?.get(1)
+    }
+
+    /**
      * Validates every component's `<script>` set against the package-wide definition index.
+     *
+     * A component's EFFECTIVE script set is its own `<script>` URIs plus those of every
+     * packaged ancestor reached by walking `extends` (case-insensitively — SceneGraph
+     * component names are case-insensitive) until the base is not a packaged component,
+     * i.e. a SceneGraph built-in. SceneGraph: all functions defined in a component that is
+     * extended can be called from the derived component (Creating custom components page)
+     * — so a leaf's static call to a base component's global (the compiler's `super.f()`
+     * emission) resolves at runtime without the base's script in the leaf's XML, and must
+     * not be reported. Only the component's OWN scripts are scanned for calls: an
+     * ancestor's calls are checked when that ancestor is validated, and its scope is a
+     * subset of every descendant's.
      *
      * @param sourceFiles .brs files staged into the package's source/ directory
      *   (stdlib runtime + kotlin.test runtime + compiled main/test sources)
      * @param componentFiles .brs files packaged under components/
-     * @param components the packaged component XMLs with their script lists
+     * @param components the packaged component XMLs with their script lists and extends
      */
     fun validate(
         sourceFiles: Collection<File>,
@@ -308,6 +336,8 @@ object ComponentIncludeValidator {
         val refsCache = mutableMapOf<File, Set<String>>()
         fun refs(f: File): Set<String> = refsCache.getOrPut(f) { extractBareRefs(stripped(f), definitions.keys) }
 
+        val componentsByComponentName = components.associateBy { it.name.lowercase() }
+
         val findings = mutableListOf<Finding>()
         for (component in components) {
             // Resolve each listed URI to packaged file(s); pkg:/source/ URIs resolve against the
@@ -329,6 +359,20 @@ object ComponentIncludeValidator {
                     listedFiles.addAll(resolved)
                     allowedNames.add(fileName)
                 }
+            }
+
+            // Extends chain: every packaged ancestor's scripts are in scope too (see the KDoc).
+            // The walk stops at a non-packaged base (SceneGraph built-in) or on a cycle; ancestor
+            // URIs only widen the allowed set — their files are scanned under the ancestor itself,
+            // and a missing ancestor script is that ancestor's SCRIPT_MISSING finding, not ours.
+            val visited = mutableSetOf(component.name.lowercase())
+            var ancestor = component.extends?.let { componentsByComponentName[it.lowercase()] }
+            while (ancestor != null && visited.add(ancestor.name.lowercase())) {
+                for (uri in ancestor.scriptUris) {
+                    val fileName = uri.substringAfterLast('/').lowercase()
+                    if (fileName.endsWith(".brs")) allowedNames.add(fileName)
+                }
+                ancestor = ancestor.extends?.let { componentsByComponentName[it.lowercase()] }
             }
 
             // callName(lower) -> usage evidence merged across calls and bare references, so a

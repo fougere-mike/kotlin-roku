@@ -166,4 +166,62 @@ class ValidateComponentIncludesTaskTest {
 
         assertTrue(File(tmp.root, "report.txt").readText().contains("0 finding(s)"))
     }
+
+    /**
+     * Base component B (extends Group) defines B_describe_k_ in its own script; leaf L extends B
+     * and lists only its own script, whose body is [leafBody]. Mirrors the compiler's super.f()
+     * emission: a static call into the base component's global, in scope through SceneGraph's
+     * extends chain without the base's script in the leaf XML.
+     */
+    private fun makeExtendsChainTask(leafBody: String): ValidateComponentIncludesTask {
+        write("staged/FillerKt.brs", fillerDefinitions())
+        write("compiled/B/b.brs", "function B_describe_k_() as String\n  return \"base\"\nend function\n")
+        write(
+            "compiled/B/B.xml",
+            "<component name=\"B\" extends=\"Group\">\n" +
+                "  <script type=\"text/brightscript\" uri=\"pkg:/components/B/b.brs\" />\n" +
+                "</component>\n"
+        )
+        write("compiled/L/l.brs", "function L_describe_k_() as String\n$leafBody" + "end function\n")
+        write(
+            "compiled/L/L.xml",
+            "<component name=\"L\" extends=\"B\">\n" +
+                "  <script type=\"text/brightscript\" uri=\"pkg:/components/L/l.brs\" />\n" +
+                "</component>\n"
+        )
+        write("processed/.keep", "")
+        val project = ProjectBuilder.builder().withProjectDir(tmp.root).build()
+        val task = project.tasks
+            .register("validateComponentIncludesExtends", ValidateComponentIncludesTask::class.java)
+            .get()
+        task.processedXmlDir.set(File(tmp.root, "processed"))
+        task.compiledComponentsDir.set(File(tmp.root, "compiled"))
+        task.stagedSourceDir.set(File(tmp.root, "staged"))
+        task.mode.set("strict")
+        task.extraBuiltins.set(emptySet())
+        task.reportFile.set(File(tmp.root, "report.txt"))
+        return task
+    }
+
+    @Test
+    fun `leaf calling a base component global through the extends chain is not a finding`() {
+        val task = makeExtendsChainTask("  return B_describe_k_() + \"+leaf\"\n")
+
+        task.validate()
+
+        assertTrue(File(tmp.root, "report.txt").readText().contains("0 finding(s)"))
+    }
+
+    @Test
+    fun `extends chain does not excuse a call defined nowhere`() {
+        val task = makeExtendsChainTask("  return Zzz_k_()\n")
+
+        val e = runExpectingFailure(task)
+
+        assertNotNull("strict mode must still fail on an undefined call from an extending leaf", e)
+        val report = File(tmp.root, "report.txt").readText()
+        assertTrue(report.contains("1 finding(s)"))
+        assertTrue(report.contains("UNDEFINED: Zzz_k_"))
+        assertTrue(report.contains("l.brs"))
+    }
 }

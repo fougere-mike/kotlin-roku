@@ -96,11 +96,13 @@ abstract class ValidateComponentIncludesTask : DefaultTask() {
             ?.filter { it.isFile && it.extension == "xml" }
             ?.forEach { xml ->
                 userXmlNames.add(xml.nameWithoutExtension.lowercase())
+                val text = xml.readText()
                 components.add(
                     ComponentScripts(
                         xml.nameWithoutExtension,
                         xml.path,
-                        ComponentIncludeValidator.parseScriptUris(xml.readText()),
+                        ComponentIncludeValidator.parseScriptUris(text),
+                        extends = ComponentIncludeValidator.parseExtends(text),
                     )
                 )
             }
@@ -108,11 +110,13 @@ abstract class ValidateComponentIncludesTask : DefaultTask() {
             ?.filter { it.isFile && it.extension == "xml" }
             ?.filter { it.nameWithoutExtension.lowercase() !in userXmlNames }
             ?.forEach { xml ->
+                val text = xml.readText()
                 components.add(
                     ComponentScripts(
                         xml.nameWithoutExtension,
                         xml.path,
-                        ComponentIncludeValidator.parseScriptUris(xml.readText()),
+                        ComponentIncludeValidator.parseScriptUris(text),
+                        extends = ComponentIncludeValidator.parseExtends(text),
                     )
                 )
             }
